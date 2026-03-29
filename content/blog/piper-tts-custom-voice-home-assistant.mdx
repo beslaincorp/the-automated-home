@@ -1,0 +1,251 @@
+---
+title: "How to Add a Custom Jarvis Voice to Home Assistant with Piper TTS"
+description: "Set up Piper TTS with a custom Jarvis voice model in Home Assistant. Covers model installation, configuration, multi-room speaker setup, and 9 ready-to-use voice automations."
+date: "2026-03-28"
+slug: "piper-tts-custom-voice-home-assistant"
+keywords:
+  - piper tts custom voice home assistant
+  - home assistant tts
+  - jarvis voice home assistant
+  - piper tts setup
+  - smart home voice
+---
+
+# How to Add a Custom Jarvis Voice to Home Assistant with Piper TTS
+
+Cloud TTS services cost money every month and depend on someone else's servers. Piper TTS runs locally, is free, and with the right voice model, sounds better than most cloud options. This guide sets up a custom Jarvis-style voice on Home Assistant with no cloud dependency.
+
+This is running in production on my system with 7 distributed speakers across the house, triggered by ELK M1 alarm events, garage doors, and presence detection.
+
+## What is Piper TTS?
+
+Piper is a local text-to-speech engine built for Home Assistant. It runs on the same hardware as your HA instance (a Pi 4/5 handles it fine) and supports custom ONNX voice models. There are dozens of built-in voices, but you can also load community models — including voices that sound like Jarvis from the MCU.
+
+Key advantages over cloud TTS:
+- Zero latency from API calls — speech starts in under a second on a Pi 5
+- No monthly costs (ElevenLabs is $5-22/month)
+- Works during internet outages
+- No rate limits or usage caps
+- Full control over the voice model
+
+## Step 1: Install the Piper Add-on
+
+If you are running Home Assistant OS or Supervised:
+
+1. Go to Settings > Add-ons > Add-on Store
+2. Search for "Piper"
+3. Install the Piper add-on
+4. Start it
+
+Piper runs as a local service on port 10200. Home Assistant discovers it automatically.
+
+If you are running HA Container or Core, you can run Piper as a standalone Docker container:
+
+```bash
+docker run -d --name piper \
+  -p 10200:10200 \
+  -v /path/to/models:/share/piper \
+  rhasspy/wyoming-piper
+```
+
+## Step 2: Download the Jarvis Voice Model
+
+The custom Jarvis voice model is a community-trained ONNX model. The one I use is from the `jgkawell/jarvis` repository on HuggingFace.
+
+Download two files:
+- `jarvis-high.onnx` — the voice model
+- `jarvis-high.onnx.json` — the model configuration
+
+Place both files in your Piper models directory:
+- HA OS: `/share/piper/`
+- Docker: wherever you mounted the `/share/piper` volume
+
+After copying the files, restart the Piper add-on. The new voice will be available in the Piper configuration.
+
+## Step 3: Configure the TTS Entity
+
+Go to Settings > Devices & Services. You should see Piper listed. Click Configure and set:
+
+- Default voice: `jarvis-high`
+- Speaker: 0 (default)
+- Noise scale: 0.667 (controls variation — lower is more consistent)
+- Length scale: 1.0 (speech speed — lower is faster)
+- Noise W: 0.8
+
+The TTS entity will be `tts.piper`. Test it immediately:
+
+```yaml
+service: tts.speak
+target:
+  entity_id: tts.piper
+data:
+  media_player_entity_id: media_player.b_room
+  message: "Good evening, sir. All systems operational."
+  options:
+    voice: jarvis-high
+```
+
+If you hear the voice through your speaker, you are good. If not, check that your media player entity supports TTS playback (HomePods, Chromecast, and Sonos all work; some TV media players do not).
+
+## Step 4: Multi-Room Audio with Snapcast (Optional)
+
+If you want synchronized voice announcements across multiple rooms, you need a multi-room audio system. The simplest approach for Home Assistant is Snapcast.
+
+Architecture:
+- Snapcast Server runs on your HA host (Pi 5)
+- Snapcast Clients run on small devices in each room (Pi Zero 2 W works well)
+- Each client connects to a DAC (PCM5102A over I2S for best quality) and then to an amplifier
+
+For a wired speaker system (like ELK SP12F speakers distributed through the house), you can use a single amplifier with distributed audio. My system uses 7 speakers wired back to a central amp location.
+
+The Piper TTS output routes to the Snapcast server, which pushes audio to all clients simultaneously. Latency is under 20ms.
+
+## Step 5: Voice Automations
+
+Here are 9 automations running in production. All live in a single Home Assistant package file.
+
+### Welcome Home
+
+```yaml
+automation:
+  - alias: jarvis_welcome_home
+    trigger:
+      - platform: state
+        entity_id: person.baily_aldea
+        to: "home"
+    condition:
+      - condition: state
+        entity_id: alarm_control_panel.elkm1_area_1
+        state: "armed_away"
+    action:
+      - service: tts.speak
+        target:
+          entity_id: tts.piper
+        data:
+          media_player_entity_id: media_player.b_room
+          message: "Welcome home, sir. Disarming the security system."
+          options:
+            voice: jarvis-high
+      - service: alarm_control_panel.alarm_disarm
+        target:
+          entity_id: alarm_control_panel.elkm1_area_1
+        data:
+          code: "1234"
+```
+
+### System Armed
+
+```yaml
+automation:
+  - alias: jarvis_system_armed
+    trigger:
+      - platform: state
+        entity_id: alarm_control_panel.elkm1_area_1
+        to: "armed_away"
+    action:
+      - service: tts.speak
+        target:
+          entity_id: tts.piper
+        data:
+          media_player_entity_id: media_player.b_room
+          message: "Security system armed. All perimeter zones secured."
+          options:
+            voice: jarvis-high
+```
+
+### Alarm Triggered
+
+```yaml
+automation:
+  - alias: jarvis_alarm_alert
+    trigger:
+      - platform: state
+        entity_id: alarm_control_panel.elkm1_area_1
+        to: "triggered"
+    action:
+      - service: tts.speak
+        target:
+          entity_id: tts.piper
+        data:
+          media_player_entity_id: media_player.b_room
+          message: "Warning. Security breach detected. Alarm has been triggered."
+          options:
+            voice: jarvis-high
+```
+
+### Garage Door
+
+```yaml
+automation:
+  - alias: jarvis_garage_opened
+    trigger:
+      - platform: state
+        entity_id: cover.garage_bay_1
+        to: "open"
+    action:
+      - service: tts.speak
+        target:
+          entity_id: tts.piper
+        data:
+          media_player_entity_id: media_player.b_room
+          message: "Garage bay one is now open."
+          options:
+            voice: jarvis-high
+```
+
+### Good Night
+
+```yaml
+automation:
+  - alias: jarvis_goodnight
+    trigger:
+      - platform: state
+        entity_id: alarm_control_panel.elkm1_area_1
+        to: "armed_home"
+    condition:
+      - condition: time
+        after: "21:00:00"
+        before: "05:00:00"
+    action:
+      - service: tts.speak
+        target:
+          entity_id: tts.piper
+        data:
+          media_player_entity_id: media_player.b_room
+          message: "Good night, sir. System armed in stay mode. All perimeter zones active."
+          options:
+            voice: jarvis-high
+```
+
+The full set includes 9 automations: welcome home, system armed (away and stay), alarm triggered, person arrived, garage open/close, good night, and disarm confirmation.
+
+## Comparison: Piper vs Cloud TTS
+
+| Feature | Piper TTS | ElevenLabs | Google Cloud TTS |
+|---------|-----------|------------|-----------------|
+| Monthly cost | $0 | $5-22 | Pay per character |
+| Latency | < 1s local | 1-3s network | 1-2s network |
+| Internet required | No | Yes | Yes |
+| Custom voices | ONNX models | Voice cloning | WaveNet presets |
+| Quality (subjective) | Good-Great | Excellent | Great |
+| Rate limits | None | 10k-100k chars/mo | Varies |
+
+Piper is not quite ElevenLabs quality, but it is close enough that the latency and cost advantages make it the clear winner for home automation. You do not need movie-quality voice synthesis to announce "garage door open."
+
+## Troubleshooting
+
+**No audio output**: Check that the target media player supports TTS. Some media players (especially TV-based ones) reject TTS audio. Use a dedicated speaker entity.
+
+**Voice sounds robotic**: Make sure you are using the `-high` quality model, not the medium or low variants. The high model is larger but significantly better.
+
+**Long pauses before speech**: On a Pi 4, the first TTS call after a restart takes 2-3 seconds while the model loads into memory. Subsequent calls are under a second. On a Pi 5, even the first call is fast.
+
+**Model not found**: Verify the `.onnx` and `.onnx.json` files are both in `/share/piper/` and the filenames match exactly. Restart the Piper add-on after adding new models.
+
+## Get the Full Voice Pack
+
+The [Jarvis Voice Pack](https://beslain.gumroad.com/l/ha-jarvis-voice-pack) includes the pre-configured voice model, all 9 automations as a ready-to-install HA package, multi-room Snapcast setup guide, and the message templates I use in production.
+
+Related guides:
+- [How to Integrate ELK M1 with Home Assistant](/blog/elk-m1-home-assistant-complete-guide)
+- [Smart Motion-Activated Night Lights with Home Assistant](/blog/home-assistant-night-light-automation)

@@ -1,0 +1,596 @@
+---
+title: "15 Best Home Assistant Automations in 2026 (With YAML Examples)"
+description: "The 15 most useful Home Assistant automations running in production right now. Complete YAML for each — from motion-activated night lights to intelligent alarm response. Copy, paste, customize."
+date: "2026-03-29"
+slug: "best-home-assistant-automations-2026"
+keywords:
+  - best home assistant automations
+  - home assistant automations 2026
+  - home assistant automation examples
+  - home assistant yaml automations
+  - useful home assistant automations
+---
+
+# 15 Best Home Assistant Automations in 2026 (With YAML Examples)
+
+Most "best automations" lists give you ten variations of "turn on a light when motion is detected." This is not that. These are the 15 automations that actually run every day on a production Home Assistant system with 54 wired zones, 71 lighting entities, 4 IP cameras, and distributed whole-house audio. Every automation here has been tested, debugged, and refined through actual daily use.
+
+Each one includes the full YAML so you can drop it into your system and customize it.
+
+## 1. Time-Based Motion Night Lights
+
+The single most useful automation you can build. Motion sensor triggers a light at brightness levels that change throughout the night — dim at 2 AM, brighter at 6 AM. Nobody wants to get blinded walking to the bathroom.
+
+```yaml
+automation:
+  - alias: hallway_night_light
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.hallway_motion
+        to: "on"
+    condition:
+      - condition: sun
+        after: sunset
+        after_offset: "-00:30:00"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.hallway
+        data:
+          brightness: >
+            {% set hour = now().hour %}
+            {% if hour >= 22 or hour < 1 %}77
+            {% elif hour >= 1 and hour < 5 %}25
+            {% elif hour >= 5 and hour < 7 %}51
+            {% else %}102{% endif %}
+      - wait_for_trigger:
+          - platform: state
+            entity_id: binary_sensor.hallway_motion
+            to: "off"
+            for: "00:02:00"
+      - service: light.turn_off
+        target:
+          entity_id: light.hallway
+```
+
+The `wait_for_trigger` pattern is critical. It waits for motion to clear for 2 full minutes before turning off, so continuous movement keeps the light on.
+
+## 2. Alarm-Triggered Full Response
+
+When a real alarm triggers, you need more than a notification. This fires sirens, flashes every light in the house, sends camera snapshots, and announces through distributed speakers — all simultaneously.
+
+```yaml
+automation:
+  - alias: alarm_triggered_full_response
+    trigger:
+      - platform: state
+        entity_id: alarm_control_panel.area_1
+        to: "triggered"
+    action:
+      - parallel:
+          - service: siren.turn_on
+            target:
+              entity_id: siren.front_sirens
+          - service: light.turn_on
+            target:
+              entity_id: group.all_interior_lights
+            data:
+              brightness: 255
+              flash: long
+          - service: notify.mobile_app_phone
+            data:
+              title: "ALARM TRIGGERED"
+              message: "{{ trigger.to_state.attributes.changed_by }}"
+              data:
+                push:
+                  sound:
+                    name: alarm.caf
+                    critical: 1
+                    volume: 1.0
+          - service: tts.speak
+            target:
+              entity_id: tts.piper
+            data:
+              media_player_entity_id: media_player.whole_house
+              message: "Security alert. Alarm has been triggered. Authorities have been notified."
+```
+
+The `parallel` block is essential. You do not want these actions running sequentially — every second matters in an alarm response.
+
+## 3. Garage Door Left Open Warning
+
+Escalating notifications when a garage door is left open. First alert at 10 minutes, repeat every 15 minutes, and auto-close after 30 minutes if nobody responds.
+
+```yaml
+automation:
+  - alias: garage_left_open_warning
+    trigger:
+      - platform: state
+        entity_id: cover.garage_bay_1
+        to: "open"
+        for: "00:10:00"
+    action:
+      - repeat:
+          while:
+            - condition: state
+              entity_id: cover.garage_bay_1
+              state: "open"
+          sequence:
+            - service: notify.mobile_app_phone
+              data:
+                title: "Garage Door Open"
+                message: >
+                  Bay 1 has been open for {{ relative_time(states.cover.garage_bay_1.last_changed) }}.
+                data:
+                  actions:
+                    - action: CLOSE_GARAGE
+                      title: "Close It"
+            - delay: "00:15:00"
+      - condition: state
+        entity_id: cover.garage_bay_1
+        state: "open"
+        for: "00:30:00"
+      - service: cover.close_cover
+        target:
+          entity_id: cover.garage_bay_1
+```
+
+The actionable notification with the "Close It" button means you can fix it without opening the app.
+
+## 4. Welcome Home Presence Detection
+
+Detects when you arrive home and adjusts the house — unlocks the door, turns on path lighting, disarms the alarm, and announces your arrival.
+
+```yaml
+automation:
+  - alias: welcome_home
+    trigger:
+      - platform: state
+        entity_id: person.your_name
+        to: "home"
+    condition:
+      - condition: state
+        entity_id: alarm_control_panel.area_1
+        state: "armed_away"
+    action:
+      - service: alarm_control_panel.alarm_disarm
+        target:
+          entity_id: alarm_control_panel.area_1
+        data:
+          code: !secret alarm_code
+      - service: light.turn_on
+        target:
+          entity_id:
+            - light.entryway
+            - light.hallway
+        data:
+          brightness: 200
+      - service: tts.speak
+        target:
+          entity_id: tts.piper
+        data:
+          media_player_entity_id: media_player.entryway_speaker
+          message: "Welcome home."
+```
+
+## 5. Smart Bedtime Routine
+
+One input boolean triggers a full bedtime sequence: dims lights progressively, locks doors, arms the alarm in night mode, sets thermostat, and turns off media.
+
+```yaml
+automation:
+  - alias: bedtime_routine
+    trigger:
+      - platform: state
+        entity_id: input_boolean.bedtime
+        to: "on"
+    action:
+      - service: light.turn_off
+        target:
+          entity_id: group.common_area_lights
+      - service: light.turn_on
+        target:
+          entity_id: light.bedroom
+        data:
+          brightness: 40
+      - service: media_player.turn_off
+        target:
+          entity_id: media_player.living_room_tv
+      - service: alarm_control_panel.alarm_arm_night
+        target:
+          entity_id: alarm_control_panel.area_1
+        data:
+          code: !secret alarm_code
+      - service: climate.set_temperature
+        target:
+          entity_id: climate.bedroom_thermostat
+        data:
+          temperature: 68
+      - delay: "00:20:00"
+      - service: light.turn_off
+        target:
+          entity_id: light.bedroom
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.bedtime
+```
+
+## 6. Camera Motion Snapshot Notifications
+
+When a camera detects motion, grab a snapshot and send it as a rich notification with the image embedded. Includes debouncing so you do not get 50 notifications for one event.
+
+```yaml
+automation:
+  - alias: camera_motion_snapshot
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.front_driveway_motion
+        to: "on"
+    condition:
+      - condition: state
+        entity_id: input_boolean.front_camera_cooldown
+        state: "off"
+    action:
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.front_camera_cooldown
+      - service: camera.snapshot
+        target:
+          entity_id: camera.front_driveway
+        data:
+          filename: /config/www/snapshots/front_driveway_latest.jpg
+      - service: notify.mobile_app_phone
+        data:
+          title: "Motion: Front Driveway"
+          message: "Movement detected at {{ now().strftime('%I:%M %p') }}"
+          data:
+            image: /local/snapshots/front_driveway_latest.jpg
+      - delay: "00:01:00"
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.front_camera_cooldown
+```
+
+The cooldown boolean prevents notification floods. One minute between alerts per camera.
+
+## 7. Adaptive Lighting by Time of Day
+
+Adjusts light color temperature throughout the day — cool white for focus during work hours, warm amber in the evening, dim warm at night.
+
+```yaml
+automation:
+  - alias: adaptive_lighting_schedule
+    trigger:
+      - platform: time
+        at:
+          - "07:00:00"
+          - "17:00:00"
+          - "20:00:00"
+          - "22:00:00"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: group.common_area_lights
+        data:
+          kelvin: >
+            {% set hour = now().hour %}
+            {% if hour >= 7 and hour < 17 %}4500
+            {% elif hour >= 17 and hour < 20 %}3200
+            {% elif hour >= 20 and hour < 22 %}2700
+            {% else %}2200{% endif %}
+          brightness: >
+            {% set hour = now().hour %}
+            {% if hour >= 7 and hour < 17 %}230
+            {% elif hour >= 17 and hour < 20 %}200
+            {% elif hour >= 20 and hour < 22 %}140
+            {% else %}60{% endif %}
+```
+
+## 8. Leaving Home Auto-Arm
+
+When everyone leaves, lock up and arm. Includes a safety delay to cancel if you forgot something and come back immediately.
+
+```yaml
+automation:
+  - alias: everyone_left_arm
+    trigger:
+      - platform: state
+        entity_id: zone.home
+        to: "0"
+        for: "00:05:00"
+    action:
+      - service: cover.close_cover
+        target:
+          entity_id:
+            - cover.garage_bay_1
+            - cover.garage_bay_2
+      - service: light.turn_off
+        target:
+          entity_id: all
+      - service: alarm_control_panel.alarm_arm_away
+        target:
+          entity_id: alarm_control_panel.area_1
+        data:
+          code: !secret alarm_code
+      - service: notify.mobile_app_phone
+        data:
+          title: "House Armed"
+          message: "Everyone left. System armed away, garage closed."
+```
+
+The 5-minute `for` delay prevents false triggers from GPS jitter or quick trips to the mailbox.
+
+## 9. Package Delivery Detection
+
+Camera plus notification when someone approaches the front door and the doorbell is not pressed. Catches package deliveries that do not ring the bell.
+
+```yaml
+automation:
+  - alias: package_delivery_detected
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.front_door_motion
+        to: "on"
+    condition:
+      - condition: state
+        entity_id: person.your_name
+        state: "not_home"
+      - condition: state
+        entity_id: binary_sensor.front_doorbell
+        state: "off"
+    action:
+      - delay: "00:00:03"
+      - service: camera.snapshot
+        target:
+          entity_id: camera.front_door
+        data:
+          filename: /config/www/snapshots/front_door_delivery.jpg
+      - service: notify.mobile_app_phone
+        data:
+          title: "Possible Delivery"
+          message: "Someone at the front door (no doorbell pressed)"
+          data:
+            image: /local/snapshots/front_door_delivery.jpg
+```
+
+The 3-second delay before the snapshot means you catch the person still in frame, not the initial motion blur.
+
+## 10. HVAC Zone Optimization
+
+If a room is unoccupied for 30 minutes, raise the setpoint to save energy. When motion returns, restore the comfortable temperature.
+
+```yaml
+automation:
+  - alias: unoccupied_room_setback
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.office_motion
+        to: "off"
+        for: "00:30:00"
+    action:
+      - service: climate.set_temperature
+        target:
+          entity_id: climate.office_thermostat
+        data:
+          temperature: >
+            {% if state_attr('climate.office_thermostat', 'hvac_action') == 'heating' %}
+              62
+            {% else %}
+              78
+            {% endif %}
+
+  - alias: occupied_room_restore
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.office_motion
+        to: "on"
+    action:
+      - service: climate.set_temperature
+        target:
+          entity_id: climate.office_thermostat
+        data:
+          temperature: >
+            {% if state_attr('climate.office_thermostat', 'hvac_action') == 'heating' %}
+              70
+            {% else %}
+              73
+            {% endif %}
+```
+
+## 11. Laundry Cycle Complete Notification
+
+Uses a power monitoring plug to detect when the washer or dryer finishes. When power drops below threshold and stays low, the cycle is done.
+
+```yaml
+automation:
+  - alias: washer_finished
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.washer_power
+        below: 5
+        for: "00:03:00"
+    condition:
+      - condition: numeric_state
+        entity_id: sensor.washer_power
+        above: 0.5
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "Laundry Done"
+          message: "Washer cycle complete. Move clothes to dryer."
+      - service: tts.speak
+        target:
+          entity_id: tts.piper
+        data:
+          media_player_entity_id: media_player.kitchen_speaker
+          message: "The washer has finished its cycle."
+```
+
+The `above: 0.5` condition prevents false triggers when the washer is fully off (drawing 0W). It only fires when power drops from active to idle.
+
+## 12. Lighting Scene Controller
+
+Physical button press cycles through predefined scenes. Single press for "normal," double press for "movie," long press for "off." Works with any Zigbee or Z-Wave button.
+
+```yaml
+automation:
+  - alias: living_room_scene_controller
+    trigger:
+      - platform: event
+        event_type: zha_event
+        event_data:
+          device_id: "your_button_device_id"
+    action:
+      - choose:
+          - conditions:
+              - "{{ trigger.event.data.command == 'toggle' }}"
+            sequence:
+              - service: scene.turn_on
+                target:
+                  entity_id: scene.living_room_normal
+          - conditions:
+              - "{{ trigger.event.data.command == 'double' }}"
+            sequence:
+              - service: scene.turn_on
+                target:
+                  entity_id: scene.living_room_movie
+          - conditions:
+              - "{{ trigger.event.data.command == 'hold' }}"
+            sequence:
+              - service: light.turn_off
+                target:
+                  entity_id: group.living_room_lights
+```
+
+## 13. Water Leak Emergency Response
+
+Water sensor triggers an emergency: shuts off the main water valve (if you have a smart valve), sends critical notifications, and flashes a specific light as a visual indicator.
+
+```yaml
+automation:
+  - alias: water_leak_emergency
+    trigger:
+      - platform: state
+        entity_id:
+          - binary_sensor.kitchen_water_leak
+          - binary_sensor.bathroom_water_leak
+          - binary_sensor.laundry_water_leak
+        to: "on"
+    action:
+      - parallel:
+          - service: switch.turn_off
+            target:
+              entity_id: switch.main_water_valve
+          - service: notify.mobile_app_phone
+            data:
+              title: "WATER LEAK DETECTED"
+              message: "{{ trigger.to_state.name }} at {{ now().strftime('%I:%M %p') }}. Water valve shut off."
+              data:
+                push:
+                  sound:
+                    name: alarm.caf
+                    critical: 1
+                    volume: 1.0
+          - service: light.turn_on
+            target:
+              entity_id: light.kitchen
+            data:
+              color_name: blue
+              flash: long
+```
+
+## 14. Sunrise Gradual Wake-Up
+
+Mimics sunrise in the bedroom starting 30 minutes before your alarm. Lights gradually brighten from 0 to 60% with warming color temperature.
+
+```yaml
+automation:
+  - alias: sunrise_wakeup
+    trigger:
+      - platform: time
+        at: input_datetime.wakeup_time
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.bedroom
+        data:
+          brightness: 5
+          kelvin: 2200
+      - repeat:
+          count: 6
+          sequence:
+            - delay: "00:05:00"
+            - service: light.turn_on
+              target:
+                entity_id: light.bedroom
+              data:
+                brightness: "{{ 5 + (repeat.index * 25) }}"
+                kelvin: "{{ 2200 + (repeat.index * 200) }}"
+```
+
+Set `input_datetime.wakeup_time` to 30 minutes before you want to be fully awake. The light ramps from barely visible warm amber to a bright natural white over 30 minutes.
+
+## 15. Voice Announcements for House Events
+
+Ties multiple triggers to spoken announcements through distributed speakers. Garage opens, doors lock, alarm status changes — all announced by voice.
+
+```yaml
+automation:
+  - alias: voice_house_events
+    trigger:
+      - platform: state
+        entity_id: cover.garage_bay_1
+        to: "open"
+        id: garage_open
+      - platform: state
+        entity_id: cover.garage_bay_1
+        to: "closed"
+        id: garage_closed
+      - platform: state
+        entity_id: alarm_control_panel.area_1
+        to: "armed_away"
+        id: armed_away
+      - platform: state
+        entity_id: alarm_control_panel.area_1
+        to: "disarmed"
+        id: disarmed
+    action:
+      - service: tts.speak
+        target:
+          entity_id: tts.piper
+        data:
+          media_player_entity_id: media_player.whole_house
+          message: >
+            {% if trigger.id == 'garage_open' %}Garage bay 1 is opening.
+            {% elif trigger.id == 'garage_closed' %}Garage bay 1 is now closed.
+            {% elif trigger.id == 'armed_away' %}System armed. Away mode.
+            {% elif trigger.id == 'disarmed' %}System disarmed. Welcome home.
+            {% endif %}
+```
+
+The trigger `id` pattern is the cleanest way to handle multi-trigger automations. One automation, one action block, multiple trigger sources resolved with templates.
+
+## The Pattern Behind Good Automations
+
+Every solid automation shares three traits:
+
+1. **Debouncing** — cooldown timers, `for` durations, or boolean gates prevent repeated firing
+2. **Context awareness** — time of day, presence state, and system mode inform the action
+3. **Graceful failure** — if one action fails, the others still run (use `parallel` and `continue_on_error`)
+
+If your automation does not have at least one of these, it is going to annoy you within a week.
+
+## Get These Automations Pre-Built
+
+All 15 automations above plus 20 more are available in the **Home Assistant Automation Cookbook** — complete YAML packages you can drop into your system and customize in minutes.
+
+The **Night Lights Pack** is also available standalone if you want the most polished version of automation #1 with multi-zone support, per-room brightness curves, and helper entities pre-configured.
+
+- [Home Assistant Automation Cookbook](https://beslain.gumroad.com) — use code **LAUNCH50** for 50% off
+- [Night Lights Pack](https://beslain.gumroad.com/l/ha-night-lights-pack) — use code **LAUNCH50** for 50% off
+
+---
+
+**Want more automations like these delivered weekly?** Join the newsletter for new YAML templates, automation patterns, and real-world smart home engineering.
+
+[Subscribe to the newsletter →](https://theautomatedhome.beehiiv.com)

@@ -1,0 +1,256 @@
+---
+title: "How to Integrate ELK M1 with Home Assistant: Complete 2026 Guide"
+description: "Step-by-step guide to connecting your ELK M1 alarm panel to Home Assistant over TLS. Covers zone configuration, arming/disarming automations, and real-world troubleshooting from a 54-zone production system."
+date: "2026-03-28"
+slug: "elk-m1-home-assistant-complete-guide"
+keywords:
+  - elk m1 home assistant
+  - elk m1 integration
+  - home assistant alarm
+  - elk m1 tls
+  - home assistant security
+---
+
+# How to Integrate ELK M1 with Home Assistant: Complete 2026 Guide
+
+The ELK M1 is one of the most capable wired alarm panels you can buy. It handles up to 208 zones, has built-in voice annunciation, and supports lighting, thermostats, and automation rules natively. But its real power comes when you connect it to Home Assistant.
+
+This guide walks through the full integration from a production system running 54 wired zones across 4 expansion boards. Everything here has been tested and is running in production right now.
+
+## What You Need
+
+Before starting, make sure you have:
+
+- An ELK M1 Gold or M1EZ8 panel
+- An M1XEP Ethernet interface (firmware 2.0.44 or later recommended)
+- Home Assistant 2024.1 or later
+- Network access between HA and the M1XEP (same VLAN or routed)
+- Your ELK programming codes (you will need the master code and RP code)
+
+If you are running ElkRP2 on a PC, close it before starting. ElkRP2 holds an exclusive TCP connection to the M1XEP and will block Home Assistant from connecting. This is the number one cause of "connection refused" errors.
+
+## Step 1: Configure the M1XEP for TLS
+
+The M1XEP supports both non-secure (port 2101) and secure TLS (port 2601) connections. Always use TLS.
+
+Log into the M1XEP web interface at its IP address. Under the Ethernet Configuration page:
+
+- Set the Secure Port to 2601
+- Enable "Secure Connection Required" if you want to force TLS only
+- Set a strong username and password for the web interface
+- Note the IP address — you will need it for Home Assistant
+
+The M1XEP uses TLS 1.2 with AES128-SHA. Home Assistant's elkm1 integration handles this natively, but if you are running a reverse proxy or firewall, make sure TLS 1.2 is allowed.
+
+### Common TLS Issue: SECLEVEL
+
+Some Linux distributions (including recent Debian-based systems) default to OpenSSL SECLEVEL=2, which rejects AES128-SHA as too weak. If you see TLS handshake errors in your HA logs, you may need to patch the elkm1 integration to set SECLEVEL=0 for the ELK connection specifically.
+
+This is a known issue. The custom_components version of elkm1 includes this fix. If you are running the built-in integration and hitting TLS errors, switch to the custom component.
+
+## Step 2: Add the Integration in Home Assistant
+
+Go to Settings > Devices & Services > Add Integration and search for "ElkM1".
+
+Enter:
+- Host: your M1XEP IP address (e.g., `192.168.20.45`)
+- Port: `2601` (TLS)
+- Username and password: your M1XEP web interface credentials
+
+Home Assistant will connect and auto-discover all configured zones, areas, outputs, tasks, and thermostats. This takes 15-30 seconds on a large system.
+
+After the initial sync, you will see entities for:
+- `alarm_control_panel.elkm1_area_1` (and additional areas if configured)
+- `sensor.elkm1_zone_###` for each zone
+- `climate.thermostat_*` for connected thermostats
+- Various binary sensors for zone states
+
+## Step 3: Zone Configuration
+
+This is where most people get stuck. The ELK M1 has up to 208 zones, but only the ones with active expansion boards and programmed zone definitions will appear in Home Assistant.
+
+### Understanding Zone Types
+
+Each zone has a "zone definition" in the ELK panel that determines how it behaves:
+
+| Zone Definition | Behavior |
+|----------------|----------|
+| Burglar Entry/Exit 1 | Front door — triggers entry delay on armed |
+| Burglar Entry/Exit 2 | Secondary entry — longer delay |
+| Burglar Perimeter Instant | Windows, back doors — instant alarm |
+| Burglar Interior | Motion sensors — active in Away mode only |
+| Burglar Interior Follower | Motion that follows entry delay |
+| Fire | 24-hour fire zone |
+| Non-Alarm | Informational only (garage doors, etc.) |
+
+In Home Assistant, each zone appears as a sensor with states like `Normal`, `Violated`, `Trouble`, `Bypassed`, etc. You can use these in automations.
+
+### Mapping Your Zones
+
+I strongly recommend creating a zone map document. For a system with multiple expansion boards, you need to track:
+
+- Zone number (001-208)
+- Board number and position (Board 1 position 1-16, etc.)
+- Physical location (e.g., "Front Door Contact")
+- Wire type (NO = Normally Open at 13.6V, NC = Normally Closed at 0.64V)
+- Zone definition in the panel
+- Whether the zone is actually wired
+
+On my system: Board 1 has 16/16 positions wired, Board 2 has 13/16, Board 3 has 16/16, and Board 4 has 9/16 (speakers on a separate bus). That is 54 wired zones total.
+
+## Step 4: Arming and Disarming
+
+The `alarm_control_panel` entity supports standard HA alarm services:
+
+```yaml
+# Arm Away
+service: alarm_control_panel.alarm_arm_away
+target:
+  entity_id: alarm_control_panel.elkm1_area_1
+data:
+  code: "1234"
+
+# Arm Stay (Home)
+service: alarm_control_panel.alarm_arm_home
+target:
+  entity_id: alarm_control_panel.elkm1_area_1
+data:
+  code: "1234"
+
+# Disarm
+service: alarm_control_panel.alarm_disarm
+target:
+  entity_id: alarm_control_panel.elkm1_area_1
+data:
+  code: "1234"
+```
+
+Replace `1234` with your actual user code.
+
+### Entry and Exit Delays
+
+The ELK M1 has configurable entry and exit delays per area. On my system:
+- Entry Delay 1: 60 seconds (front door)
+- Exit Delay 1: 30 seconds
+
+These are configured in ElkRP2 under Area Definitions. Home Assistant respects whatever the panel is set to — you cannot override delays from HA.
+
+### Critical: M1XEP TCP Drop During Active Alarm
+
+This is something you will not find in any documentation. When the ELK M1 is in an active alarm state (sirens firing), the M1XEP often drops its TCP connection. This means you cannot disarm remotely via Home Assistant during an actual alarm.
+
+This is a known firmware limitation. Workarounds:
+1. Use a physical keypad to disarm (always have one accessible)
+2. The ELK-M1KTP2 keypad on the panel bus is not affected by TCP issues
+3. Build your automations to account for this — do not rely on remote disarm as your only path
+
+## Step 5: Building Automations
+
+Here are some production-tested automation patterns.
+
+### Alarm Response Automation
+
+When the alarm triggers, turn on all lights and send a notification:
+
+```yaml
+automation:
+  - alias: alarm_triggered_full_response
+    trigger:
+      - platform: state
+        entity_id: alarm_control_panel.elkm1_area_1
+        to: "triggered"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: all
+        data:
+          brightness: 255
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "ALARM TRIGGERED"
+          message: "ELK M1 alarm is active. Check cameras."
+          data:
+            push:
+              sound:
+                name: default
+                critical: 1
+                volume: 1.0
+```
+
+### Zone-Based Night Light
+
+Use ELK zones as motion triggers for lights:
+
+```yaml
+automation:
+  - alias: french_door_night_light
+    trigger:
+      - platform: state
+        entity_id: sensor.elkm1_zone_026
+        to: "Violated"
+    condition:
+      - condition: time
+        after: "22:00:00"
+        before: "06:00:00"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.back_blue_dots
+        data:
+          brightness: 50
+      - delay: "00:02:00"
+      - service: light.turn_off
+        target:
+          entity_id: light.back_blue_dots
+```
+
+### Disarm Cleanup
+
+After disarming, reset any alarm-triggered states:
+
+```yaml
+automation:
+  - alias: alarm_cleanup_on_disarm
+    trigger:
+      - platform: state
+        entity_id: alarm_control_panel.elkm1_area_1
+        to: "disarmed"
+    action:
+      - service: light.turn_off
+        target:
+          entity_id: all
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "System Disarmed"
+          message: "ELK M1 disarmed. All clear."
+```
+
+## Step 6: HomeKit Bridge
+
+If you want the ELK M1 alarm panel accessible from Apple Home:
+
+1. Add the HomeKit Bridge integration in HA
+2. Include `alarm_control_panel.elkm1_area_1` and your key zone sensors
+3. Set a PIN (e.g., 482-65-701) and pair from an iOS device
+
+The alarm panel appears as a Security System in HomeKit with Away, Home, Night, and Off modes. Zone sensors appear as contact sensors or motion sensors depending on their zone definition.
+
+## Troubleshooting
+
+**Connection refused**: Close ElkRP2 on your PC. It holds an exclusive connection.
+
+**TLS handshake failed**: Check OpenSSL SECLEVEL. The M1XEP uses AES128-SHA which some systems reject. Use the custom component with SECLEVEL=0.
+
+**Zones not appearing**: Only programmed zones with active expansion boards appear. Check ElkRP2 to verify zone definitions are set.
+
+**Arming fails silently**: Check the HA logs. Common cause: a zone is in "Trouble" state (broken wire, EOL resistor issue). The panel will not arm with a troubled zone unless it is bypassed.
+
+**Entity states lagging**: The M1XEP pushes state changes in real time, but there is a brief delay (1-3 seconds) on large systems. This is normal.
+
+## Next Steps
+
+If you want the full package with all the automations, zone mapping templates, and troubleshooting guide, check out the [ELK M1 + HA Security Blueprint](https://beslain.gumroad.com/l/elk-m1-ha-security-blueprint). It is everything from this guide plus the production YAML from a 54-zone system.
+
+Also check out:
+- [How to Add a Custom Jarvis Voice to Home Assistant with Piper TTS](/blog/piper-tts-custom-voice-home-assistant)
+- [Smart Motion-Activated Night Lights with Home Assistant](/blog/home-assistant-night-light-automation)

@@ -1,0 +1,241 @@
+---
+title: "20 Smart Home Automation Ideas for Beginners"
+description: "20 practical smart home automation ideas you can set up this weekend. From simple light schedules to motion-triggered alerts, each idea includes a difficulty rating and what you need to get started."
+date: "2026-03-28"
+slug: "smart-home-automation-ideas-beginners"
+keywords:
+  - smart home automation ideas
+  - home automation ideas
+  - home assistant ideas for beginners
+  - smart home automation examples
+  - best smart home automations for beginners
+  - smart home ideas 2026
+---
+
+# 20 Smart Home Automation Ideas for Beginners
+
+You bought some smart home gear. Maybe a few smart bulbs, a smart plug, a door sensor. Now what? The hardware is installed but your home is not actually "smart" yet -- it is just "remote controlled."
+
+The difference between a remote-controlled home and a smart home is automations. Automations are the rules that make your home act on its own: lights that turn on when you walk in, doors that lock at bedtime, fans that adjust to the temperature.
+
+Here are 20 automation ideas organized from dead simple to moderately complex. Each one includes what hardware you need and a difficulty rating. All of these work with Home Assistant, but the concepts apply to any platform.
+
+## Simple (No Coding Required)
+
+### 1. Turn Off Lights When You Leave
+
+**What you need:** Smart bulbs or switches + phone with HA companion app
+**Difficulty:** Easy
+
+When your phone leaves the home Wi-Fi zone (or your GPS-based person entity changes to "not_home"), turn off all lights. This is the first automation everyone should build. It pays for itself in electricity savings within weeks.
+
+### 2. Porch Light at Sunset
+
+**What you need:** One smart outdoor light or switch
+**Difficulty:** Easy
+
+Use the sun trigger to turn on your porch light at sunset and off at sunrise (or at a set time like 11 PM). This adjusts automatically as days get shorter and longer throughout the year. No more seasonal timer updates.
+
+```yaml
+automation:
+  - trigger:
+      - platform: sun
+        event: sunset
+        offset: "-00:15:00"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.front_porch
+```
+
+### 3. Morning Coffee Maker
+
+**What you need:** Smart plug + regular coffee maker (the kind with a physical on switch)
+**Difficulty:** Easy
+
+Prep the coffee maker the night before with water and grounds, leave the physical switch in the "on" position, and plug it into a smart plug. Schedule the smart plug to turn on at 6:30 AM. Wake up to fresh coffee.
+
+### 4. Bathroom Fan Timer
+
+**What you need:** Smart switch on the bathroom fan
+**Difficulty:** Easy
+
+When the bathroom light turns off, wait 10 minutes, then turn off the exhaust fan. No more fans running all night because someone forgot.
+
+### 5. Bedtime Light Dimmer
+
+**What you need:** Smart bulbs that support dimming
+**Difficulty:** Easy
+
+At 9 PM, gradually dim all living area lights to 40%. At 10 PM, dim to 20%. This cues your body for sleep without you having to think about it.
+
+## Moderate (Some Templating)
+
+### 6. Welcome Home Lights
+
+**What you need:** Smart lights + phone presence detection
+**Difficulty:** Moderate
+
+When you arrive home after sunset, turn on the entryway and living room lights to 80%. During the day, skip the automation. Add a 5-minute delay then dim to your preferred level.
+
+### 7. Movie Night
+
+**What you need:** Smart lights + media player integration (Apple TV, Chromecast, Roku, etc.)
+**Difficulty:** Moderate
+
+When your media player starts playing after sunset, dim the living room lights to 10%. When playback stops or pauses, bring them back to 60%. Instant cinema mode, every time.
+
+### 8. Garage Door Left Open
+
+**What you need:** Garage door sensor (contact sensor or tilt sensor) + smart notification
+**Difficulty:** Moderate
+
+If the garage door has been open for more than 15 minutes, send a phone notification. If you have a smart garage opener, add a "Close it" button right in the notification.
+
+### 9. Package Delivery Alert
+
+**What you need:** Outdoor motion sensor or doorbell camera
+**Difficulty:** Moderate
+
+When motion is detected at the front door between 10 AM and 6 PM on weekdays, send a notification with a camera snapshot. Rate-limit to one alert per 30 minutes so you are not spammed by passing cars.
+
+### 10. Washing Machine Done
+
+**What you need:** Smart plug with energy monitoring
+**Difficulty:** Moderate
+
+Your washing machine draws 300-500W while running and under 5W when idle. Monitor the power sensor: when it drops below 10W and stays there for 3 minutes (after being above 10W), the cycle is done. Send a notification to move the laundry.
+
+```yaml
+automation:
+  - trigger:
+      - platform: numeric_state
+        entity_id: sensor.washer_plug_power
+        below: 10
+        for:
+          minutes: 3
+    condition:
+      - condition: state
+        entity_id: input_boolean.washer_running
+        state: "on"
+    action:
+      - service: notify.mobile_app_your_phone
+        data:
+          message: "Washing machine finished. Move the laundry!"
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.washer_running
+```
+
+### 11. Night Light on Motion
+
+**What you need:** Motion sensor + smart light (hallway, bathroom, or kitchen)
+**Difficulty:** Moderate
+
+Between 10 PM and 6 AM, if motion is detected in the hallway, turn on a light at 5% brightness with warm white color temperature. Turn it off 2 minutes after motion clears. Just enough light to see without waking yourself up.
+
+### 12. Door Left Open Warning
+
+**What you need:** Contact sensor on any exterior door
+**Difficulty:** Moderate
+
+If a door is open for more than 5 minutes, send a notification. If it is still open after 10 minutes, send another. Keep repeating until it is closed. Critical for the back door that kids leave open, or the side door you forget about.
+
+### 13. Low Battery Alert
+
+**What you need:** Any battery-powered smart devices
+**Difficulty:** Moderate
+
+Once a day, scan all battery sensors. If any are below 20%, send a single notification listing every device that needs attention. Much better than finding out your door sensor battery died when you actually need it.
+
+### 14. Rain Forecast, Close Windows Reminder
+
+**What you need:** Weather integration (OpenWeatherMap, etc.)
+**Difficulty:** Moderate
+
+At 7 AM, check today's forecast. If rain is predicted, send a reminder to close the windows. If you have motorized window openers, close them automatically.
+
+### 15. Guest Wi-Fi Toggle
+
+**What you need:** Router with API access (UniFi, OpenWrt, etc.) or a smart plug on your guest AP
+**Difficulty:** Moderate
+
+Create a toggle in your HA dashboard that enables/disables the guest Wi-Fi network. Share the password via a QR code on the dashboard. Turn it off when guests leave.
+
+## Advanced (Multiple Devices + Logic)
+
+### 16. Goodnight Routine
+
+**What you need:** Smart lights + smart locks + alarm panel + thermostat
+**Difficulty:** Advanced
+
+One button does everything: turn off all lights (except dim bedroom), lock every door, arm the alarm, set the thermostat to sleep mode, turn off TVs, close the garage. Expose the button to your voice assistant so you can say "Hey Siri, goodnight" from bed.
+
+### 17. Window Open, HVAC Off
+
+**What you need:** Window contact sensors + smart thermostat
+**Difficulty:** Advanced
+
+When a window sensor opens, remember the current HVAC mode, then turn off the thermostat. When all windows close again, restore the previous mode. Saves energy and stops your AC from fighting the outdoor air. The tricky part is tracking the "previous mode" and handling multiple windows.
+
+### 18. Adaptive Lighting Throughout the Day
+
+**What you need:** Smart lights that support color temperature
+**Difficulty:** Advanced
+
+Morning: cool white (5000K) to help you wake up. Afternoon: neutral (4000K). Evening: warm (3000K). Late night: very warm and dim (2200K, 20%). Run on a 30-minute timer that adjusts brightness and color temperature based on the current hour. Your eyes adjust naturally.
+
+### 19. Security Motion Alert When Away
+
+**What you need:** Indoor motion sensors + cameras + phone notifications
+**Difficulty:** Advanced
+
+When nobody is home and an indoor motion sensor triggers, snap a photo from the nearest camera and send it as a critical push notification. Rate-limit to avoid flooding during a single event. This is your basic DIY security camera system.
+
+### 20. Morning Briefing
+
+**What you need:** Smart speaker + weather integration + calendar integration
+**Difficulty:** Advanced
+
+At 7 AM on weekdays, speak a summary through your kitchen speaker: today's weather, high and low temperatures, any doors or windows left open, garage status, and calendar events. This replaces the habit of checking your phone first thing in the morning.
+
+```yaml
+automation:
+  - trigger:
+      - platform: time
+        at: "07:00:00"
+    condition:
+      - condition: time
+        weekday: [mon, tue, wed, thu, fri]
+    action:
+      - service: tts.speak
+        target:
+          entity_id: media_player.kitchen_speaker
+        data:
+          message: >-
+            Good morning. It is currently
+            {{ state_attr('weather.home', 'temperature') }} degrees
+            and {{ states('weather.home') }}.
+            {% if is_state('cover.garage_door', 'open') %}
+            The garage door is open.
+            {% endif %}
+            Have a great day.
+```
+
+## Where to Start
+
+If you are new to smart home automation, pick three from the Simple category and get them running this weekend. Once those are working and you trust the system, move to Moderate. The key is starting with automations that solve a real annoyance -- not automations that sound cool but you will never notice.
+
+The three I recommend starting with:
+
+1. **Porch Light at Sunset** -- instant set-and-forget value
+2. **Bedtime Light Dimmer** -- you will feel the difference in your sleep
+3. **Garage Door Left Open** -- prevents the thing everyone worries about
+
+## Get All 25 as Ready-to-Paste YAML
+
+If you want to skip the building phase and get 25 of the most useful automations as production-ready YAML files (including most of the ideas above plus more), check out the **[HA Automation Cookbook](https://beslain.gumroad.com/l/ha-automation-cookbook)**. Every file is commented with exactly what to customize, works as a standalone package, and includes any required helpers.
+
+For night light automations specifically, the **[Night Lights Pack](https://beslain.gumroad.com/l/ha-night-lights-pack)** has 5 ready-made night light automations with motion detection, ambient light conditions, and configurable brightness/color.
+
+**Use code LAUNCH50 for 50% off either product.**

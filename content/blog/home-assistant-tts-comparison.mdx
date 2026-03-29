@@ -1,0 +1,346 @@
+---
+title: "Home Assistant TTS Comparison: Piper vs Google vs Cloud vs ElevenLabs (2026)"
+description: "Hands-on comparison of every TTS option for Home Assistant — Piper, Google Cloud, Amazon Polly, Microsoft Edge, and ElevenLabs. Covers sound quality, latency, cost, setup complexity, and which one actually works best for smart home voice announcements."
+date: "2026-04-01"
+slug: "home-assistant-tts-comparison"
+keywords:
+  - home assistant tts
+  - piper tts home assistant
+  - home assistant text to speech
+  - piper vs google tts
+  - home assistant voice announcements
+  - best tts home assistant
+---
+
+# Home Assistant TTS Comparison: Piper vs Google vs Cloud vs ElevenLabs (2026)
+
+Text-to-speech in Home Assistant turns your smart home from silent automations into a house that talks to you. Alarm status changes, garage door warnings, welcome home greetings, weather briefings — all announced through speakers without touching your phone.
+
+But choosing a TTS engine matters more than most people realize. Latency, voice quality, reliability during internet outages, and monthly costs vary enormously. I have run five different TTS engines on the same system and can tell you exactly what works and what does not.
+
+## The Contenders
+
+| Engine | Type | Cost | Internet Required | Latency |
+|--------|------|------|-------------------|---------|
+| Piper | Local | Free | No | ~0.5-1s |
+| Google Translate TTS | Cloud | Free | Yes | 1-2s |
+| Google Cloud TTS | Cloud | $4-16/mo | Yes | 1-3s |
+| Amazon Polly | Cloud | ~$4/mo | Yes | 1-3s |
+| Microsoft Edge TTS | Cloud | Free | Yes | 1-2s |
+| ElevenLabs | Cloud | $5-22/mo | Yes | 2-5s |
+
+## Piper TTS (Local)
+
+### Setup
+
+Piper runs as a Home Assistant add-on or standalone Docker container. No cloud account, no API keys, no configuration beyond installing it.
+
+**HA OS / Supervised:**
+1. Settings > Add-ons > Add-on Store > Search "Piper"
+2. Install and start
+3. HA auto-discovers it — entity appears as `tts.piper`
+
+**Docker:**
+```bash
+docker run -d --name piper \
+  -p 10200:10200 \
+  -v /path/to/models:/data/models \
+  rhasspy/wyoming-piper
+```
+
+### Voice Selection
+
+Piper ships with dozens of voices in multiple languages. The default English voices are decent but robotic. The real value is in community models.
+
+The standout: **jgkawell/jarvis** from HuggingFace — a trained model that sounds like a professional AI assistant. Download `jarvis-high.onnx` and `jarvis-high.onnx.json`, place them in `/share/piper/`, restart the add-on, and select `jarvis-high` as the voice.
+
+```yaml
+service: tts.speak
+target:
+  entity_id: tts.piper
+data:
+  media_player_entity_id: media_player.living_room_speaker
+  message: "Welcome home. System disarmed."
+  options:
+    voice: jarvis-high
+```
+
+### Performance
+
+On a Raspberry Pi 5, Piper generates speech in under 500ms for typical announcement-length text (10-20 words). On a Pi 4, it is closer to 1 second. This is faster than every cloud option because there is no network round-trip.
+
+Piper runs on CPU. No GPU, no NPU, no special hardware. A Pi 4 handles it fine for sequential announcements. If you need concurrent TTS generation (unlikely for home use), a Pi 5 or x86 system gives more headroom.
+
+### Verdict
+
+Best overall choice for smart home announcements. Zero cost, zero internet dependency, lowest latency, and with the right voice model, sounds as good as mid-tier cloud options. The only weakness is that the default voices sound noticeably synthetic. Use a community model.
+
+**Rating: 9/10 for smart home use**
+
+## Google Translate TTS (Free Cloud)
+
+### Setup
+
+Built into Home Assistant. No add-on required.
+
+```yaml
+tts:
+  - platform: google_translate
+    language: "en"
+```
+
+That is it. Entity appears as `tts.google_translate_say`.
+
+### Voice Quality
+
+Functional but clearly robotic. The Google Translate voice is the same one from translate.google.com — it does the job but nobody would mistake it for a real person. It uses a single fixed voice with no customization options.
+
+### Reliability
+
+Requires internet. When your connection drops, announcements silently fail. There is no caching of previously generated speech (unlike some cloud TTS implementations that cache locally).
+
+Google has also been known to rate-limit the Translate TTS endpoint for high-volume users. If you fire 20 announcements in rapid succession (like during an alarm event), some may fail.
+
+### Verdict
+
+Fine for getting started. Zero cost, zero setup complexity. But you will outgrow it quickly. No voice customization, internet dependency, and the voice quality is the worst of all options here.
+
+**Rating: 5/10**
+
+## Google Cloud TTS
+
+### Setup
+
+Requires a Google Cloud account with the Text-to-Speech API enabled and a service account key.
+
+1. Create a Google Cloud project
+2. Enable the Text-to-Speech API
+3. Create a service account and download the JSON key
+4. Place the JSON key in your HA config directory
+5. Add the configuration:
+
+```yaml
+tts:
+  - platform: google_cloud
+    key_file: google_cloud_tts_key.json
+    language: "en-US"
+    voice: "en-US-Neural2-D"
+    encoding: linear16
+    speed: 1.0
+    pitch: 0.0
+```
+
+### Voice Quality
+
+Significantly better than Google Translate. The Neural2 voices are smooth, natural-sounding, and available in dozens of variations. `en-US-Neural2-D` is a deep male voice that works well for home announcements. `en-US-Neural2-C` is a clear female voice.
+
+The WaveNet voices (older tier) are also available and slightly cheaper but noticeably less natural than Neural2.
+
+### Cost
+
+Google Cloud TTS has a free tier: 1 million characters/month for standard voices, 1 million characters/month for WaveNet, but only 100K characters/month for Neural2. A typical smart home generates 5,000-20,000 characters per month in announcements, so you will likely stay in the free tier for standard or WaveNet, but Neural2 depends on volume.
+
+Beyond free tier: $4/million characters (standard), $16/million characters (Neural2).
+
+### Latency
+
+1-3 seconds. The API call, speech generation, and download add up. Noticeable compared to Piper but acceptable for non-time-critical announcements. For alarm events where you want instant voice response, this delay matters.
+
+### Verdict
+
+Best voice quality of the free-tier cloud options. Setup is more complex but the Neural2 voices are genuinely good. The internet dependency is the main downside.
+
+**Rating: 7/10**
+
+## Amazon Polly
+
+### Setup
+
+Requires an AWS account with Polly access and IAM credentials.
+
+```yaml
+tts:
+  - platform: amazon_polly
+    aws_access_key_id: !secret aws_access_key
+    aws_secret_access_key: !secret aws_secret_key
+    region_name: us-east-1
+    voice: Matthew
+    engine: neural
+    text_type: ssml
+```
+
+### Voice Quality
+
+The neural voices (Matthew, Joanna, Liam, etc.) are excellent — on par with Google Neural2. Polly also supports SSML (Speech Synthesis Markup Language) natively, letting you control emphasis, pauses, and pronunciation:
+
+```yaml
+service: tts.speak
+target:
+  entity_id: tts.amazon_polly
+data:
+  message: >
+    <speak>
+      <prosody rate="90%">Security alert.</prosody>
+      <break time="500ms"/>
+      Motion detected at the <emphasis level="strong">front door</emphasis>.
+    </speak>
+```
+
+SSML is powerful for alarm announcements where you want a specific cadence and emphasis.
+
+### Cost
+
+Polly offers 5 million characters free for the first 12 months. After that, neural voices are $16/million characters — same as Google Cloud Neural2. Standard voices are $4/million characters.
+
+For typical smart home usage (under 50K characters/month), the ongoing cost is under $1/month.
+
+### Latency
+
+1-3 seconds, comparable to Google Cloud TTS. Same tradeoff: network round-trip adds delay that local TTS does not have.
+
+### Verdict
+
+Excellent voice quality with SSML support that other engines lack. AWS account setup is the barrier. If you already have AWS, this is a strong cloud option. SSML is genuinely useful for crafting professional-sounding announcements.
+
+**Rating: 7/10**
+
+## Microsoft Edge TTS
+
+### Setup
+
+Available through HACS (Home Assistant Community Store) as a custom integration.
+
+1. Install HACS if you do not have it
+2. Add the Edge TTS integration through HACS
+3. Restart Home Assistant
+
+```yaml
+tts:
+  - platform: edge_tts
+    language: "en-US"
+```
+
+### Voice Quality
+
+Surprisingly good. Microsoft's Edge voices (the same ones used in Windows Narrator and Edge browser's read-aloud) are neural-quality with no API costs. `en-US-GuyNeural` and `en-US-JennyNeural` are both natural-sounding.
+
+The selection is extensive — over 300 voices across dozens of languages, all neural-quality.
+
+### Cost
+
+Free. Microsoft does not charge for Edge TTS usage. This is the best quality-to-cost ratio of any cloud TTS option.
+
+### The Catch
+
+This is an unofficial integration using the same endpoints that the Edge browser uses. Microsoft could change or restrict access at any time. It has been working reliably for over a year, but there is no SLA or guarantee.
+
+Internet is required. Same outage vulnerability as all cloud options.
+
+### Verdict
+
+Best free cloud TTS available. Voice quality rivals Google Neural2 and Amazon Polly neural at zero cost. The unofficial status is the only real concern. If Microsoft locks it down, you need a fallback plan.
+
+**Rating: 8/10 (with caveat about unofficial status)**
+
+## ElevenLabs
+
+### Setup
+
+Requires an ElevenLabs account and API key. Available through HACS.
+
+1. Sign up at elevenlabs.io
+2. Get your API key from the dashboard
+3. Install the ElevenLabs integration via HACS
+4. Configure with your API key
+
+### Voice Quality
+
+The best of any option here by a significant margin. ElevenLabs voices sound human. They have natural inflection, appropriate pauses, and emotional range that no other TTS engine matches. The "Rachel" and "Adam" voices are indistinguishable from a real person in short clips.
+
+You can also clone voices or fine-tune existing ones, though that requires the higher-tier plans.
+
+### Cost
+
+$5/month for 30,000 characters (Starter plan). $22/month for 100,000 characters (Creator plan). This adds up. A smart home generating 15,000-20,000 characters/month stays on the Starter plan, but heavy use pushes into Creator territory.
+
+For context: the message "Welcome home. System disarmed. The garage is closed." is 54 characters. At that rate, the Starter plan covers roughly 550 announcements per month.
+
+### Latency
+
+2-5 seconds. The slowest of all options tested. ElevenLabs generates incredibly high-quality audio, but the processing time and download size (higher bitrate) add noticeable delay. For alarm announcements, this delay is unacceptable. For "the washer is done" type announcements, it is fine.
+
+### Verdict
+
+Best voice quality, worst economics and latency for smart home use. The monthly cost and latency make it hard to recommend as a primary TTS engine. Better suited for one-off recordings or special announcements than real-time voice events.
+
+I tested it for two months and switched to Piper. The quality difference does not justify the cost and latency for short home announcements.
+
+**Rating: 6/10 for smart home use (10/10 for voice quality in isolation)**
+
+## Head-to-Head: What Actually Matters for Smart Home
+
+### Latency Ranking (Best to Worst)
+1. **Piper** — 0.5-1s (local, no network)
+2. **Google Translate** — 1-2s
+3. **Edge TTS** — 1-2s
+4. **Google Cloud / Polly** — 1-3s
+5. **ElevenLabs** — 2-5s
+
+For alarm events, sub-1-second latency matters. "Intruder alert" needs to play immediately, not after a 3-second API call. This alone makes Piper the right choice for security announcements.
+
+### Voice Quality Ranking (Best to Worst)
+1. **ElevenLabs** — indistinguishable from human
+2. **Amazon Polly Neural / Google Neural2 / Edge TTS** — tied, all excellent
+3. **Piper (community models)** — good, slightly synthetic
+4. **Piper (default voices)** — functional, clearly synthetic
+5. **Google Translate** — robotic
+
+### Reliability During Internet Outage
+1. **Piper** — fully operational
+2. **Everything else** — dead
+
+This is the single most important factor for security-related announcements. If your internet goes down during a break-in, cloud TTS fails silently. Piper keeps announcing.
+
+## My Recommendation
+
+**Use Piper as your primary TTS engine.** Install a community voice model (the Jarvis model is excellent) and use it for all automations. Zero cost, lowest latency, works offline.
+
+If you want higher voice quality for non-critical announcements (welcome home, weather briefings, etc.), add Edge TTS as a secondary engine and route specific automations to it. This gives you the best of both worlds without paying monthly fees.
+
+Skip ElevenLabs for smart home use. The quality is remarkable but the latency and cost do not make sense for short announcements that play through small speakers in noisy rooms.
+
+## Setting Up Multi-Engine TTS
+
+You can run Piper and a cloud engine simultaneously. Route time-critical announcements (alarm, security) to Piper and convenience announcements to the cloud engine:
+
+```yaml
+# Security announcement — uses Piper (local, instant)
+service: tts.speak
+target:
+  entity_id: tts.piper
+data:
+  media_player_entity_id: media_player.whole_house
+  message: "Security alert. Front door opened while armed."
+  options:
+    voice: jarvis-high
+
+# Welcome home — uses Edge TTS (higher quality, non-critical)
+service: tts.speak
+target:
+  entity_id: tts.edge_tts
+data:
+  media_player_entity_id: media_player.entryway
+  message: "Welcome home. The house is 72 degrees. No events while you were away."
+```
+
+## Get Pre-Built Voice Automations
+
+The **Jarvis Voice Pack** includes 9 production-ready voice automations for Home Assistant — alarm announcements, welcome home, garage events, goodnight sequences, and more. Pre-configured for Piper TTS with the Jarvis voice model, ready to drop into your system.
+
+[Get the Jarvis Voice Pack](https://beslain.gumroad.com/l/ha-jarvis-voice-pack) — use code **LAUNCH50** for 50% off at launch.
+
+---
+
+**Want weekly TTS tips and automation patterns?** The newsletter covers voice automation, speaker setups, and real-world HA engineering.
+
+[Subscribe to the newsletter →](https://theautomatedhome.beehiiv.com)

@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>5 Costly ELK M1 + Home Assistant Mistakes — Free Guide</title>
+<meta name="description" content="Free guide reveals 5 real ELK M1 integration pitfalls that waste weeks of your time, with exact fixes.">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,system-ui,sans-serif;background:#0a0f1a;color:#e5e7eb;line-height:1.7}
+.container{max-width:640px;margin:0 auto;padding:40px 24px}
+h1{font-size:2rem;font-weight:800;color:#fff;line-height:1.2;margin-bottom:12px}
+h2{font-size:1.3rem;font-weight:700;color:#fff;margin:32px 0 16px}
+.subtitle{font-size:1.1rem;color:#9ca3af;margin-bottom:32px}
+.accent{color:#3b82f6}
+.mistakes{list-style:none;padding:0;margin:24px 0}
+.mistakes li{padding:16px 20px;margin:12px 0;background:#111827;border-left:3px solid #3b82f6;border-radius:0 8px 8px 0}
+.mistakes li strong{color:#fff;display:block;margin-bottom:4px}
+.mistakes li span{color:#9ca3af;font-size:0.9rem}
+.proof{background:#111827;border:1px solid #1f2937;border-radius:8px;padding:20px;margin:24px 0;text-align:center}
+.proof .num{font-size:2rem;font-weight:800;color:#3b82f6}
+.proof .label{color:#9ca3af;font-size:0.85rem}
+.stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin:16px 0}
+.form-wrap{background:linear-gradient(135deg,#111827,#1e293b);border:1px solid #3b82f6;border-radius:12px;padding:32px;margin:32px 0;text-align:center}
+.form-wrap h2{margin:0 0 8px;font-size:1.2rem}
+.form-wrap p{color:#9ca3af;font-size:0.9rem;margin-bottom:20px}
+.form-row{display:flex;gap:8px;max-width:420px;margin:0 auto}
+input[type="email"]{flex:1;padding:12px 16px;border:1px solid #374151;border-radius:8px;background:#0a0f1a;color:#fff;font-size:1rem;outline:none}
+input[type="email"]:focus{border-color:#3b82f6}
+button{padding:12px 24px;background:#3b82f6;color:#fff;border:none;border-radius:8px;font-size:1rem;font-weight:600;cursor:pointer;white-space:nowrap}
+button:hover{background:#2563eb}
+.small{font-size:0.8rem;color:#6b7280;margin-top:8px}
+.divider{border:none;border-top:1px solid #1f2937;margin:40px 0}
+.upsell{background:#111827;border:1px solid #1f2937;border-radius:8px;padding:24px;text-align:center}
+.upsell a{color:#3b82f6;text-decoration:none;font-weight:600}
+.upsell a:hover{text-decoration:underline}
+.badge{display:inline-block;background:#3b82f6;color:#fff;font-size:0.75rem;font-weight:700;padding:3px 10px;border-radius:20px;margin-bottom:12px}
+@media(max-width:480px){h1{font-size:1.5rem}.form-row{flex-direction:column}.stats{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="container">
+
+<span class="badge">FREE GUIDE</span>
+<h1>5 Costly ELK M1 + Home Assistant Mistakes</h1>
+<p class="subtitle">The pitfalls that waste weeks of your time — and the exact fixes from someone who wired <span class="accent">54 zones</span> and fought every bug.</p>
+
+<div class="proof">
+<div class="stats">
+<div><div class="num">54</div><div class="label">Zones Wired</div></div>
+<div><div class="num">61</div><div class="label">Automations Built</div></div>
+<div><div class="num">6</div><div class="label">Months of Integration</div></div>
+</div>
+</div>
+
+<h2>What's Inside:</h2>
+
+<ul class="mistakes">
+<li>
+<strong>Mistake #1: The TCP Bug</strong>
+<span>Your alarm panel drops its network connection during an active alarm — making remote disarm impossible when you need it most.</span>
+</li>
+<li>
+<strong>Mistake #2: The Silent Blocker</strong>
+<span>A background application silently blocks ALL arm commands from Home Assistant. No error message. Just... nothing happens.</span>
+</li>
+<li>
+<strong>Mistake #3: The TLS Trap</strong>
+<span>Your connection breaks after every HA update because of a cipher mismatch that reports as "Invalid Auth" instead of the real error.</span>
+</li>
+<li>
+<strong>Mistake #4: The Inverted Zone</strong>
+<span>A single configuration toggle makes a zone report the opposite of reality. Your alarm literally cannot see intrusions.</span>
+</li>
+<li>
+<strong>Mistake #5: The Timer Swap</strong>
+<span>Entry and exit timers reversed in documentation. Get it wrong and you're either locked out or exposed.</span>
+</li>
+</ul>
+
+<p>Each mistake includes: <strong>what went wrong</strong>, <strong>why it's dangerous</strong>, <strong>the exact fix</strong>, and <strong>what most guides miss</strong>.</p>
+
+<div class="form-wrap">
+<h2>Get the Free Guide</h2>
+<p>2,000 words of real fixes. No fluff. Delivered to your inbox.</p>
+<form action="https://app.beehiiv.com/subscribe" method="POST">
+<input type="hidden" name="publication_id" value="YOUR_PUBLICATION_ID">
+<input type="hidden" name="utm_source" value="lead_magnet">
+<input type="hidden" name="utm_medium" value="landing_page">
+<div class="form-row">
+<input type="email" name="email" placeholder="Enter your email" required>
+<button type="submit">Send Me the Guide</button>
+</div>
+</form>
+<p class="small">Join The Automated Home newsletter. Unsubscribe anytime.</p>
+</div>
+
+<hr class="divider">
+
+<div class="upsell">
+<p style="color:#9ca3af;font-size:0.9rem;margin-bottom:8px">Want the complete integration guide?</p>
+<p style="font-size:1.1rem;margin-bottom:12px"><strong>ELK M1 HA Security Blueprint</strong></p>
+<p style="color:#9ca3af;font-size:0.85rem;margin-bottom:16px">54 zones, 61 automations, all YAML packages, wiring references, zone maps, camera integration, voice announcements — everything.</p>
+<p><a href="https://beslain.gumroad.com/l/elk-m1-ha-security-blueprint/LAUNCH50">Get 50% off with code LAUNCH50 → $24.50</a></p>
+</div>
+
+<p style="text-align:center;margin-top:40px;color:#4b5563;font-size:0.8rem">The Automated Home &copy; 2026</p>
+
+</div>
+</body>
+</html>

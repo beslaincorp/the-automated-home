@@ -1,0 +1,296 @@
+---
+title: "Smart Motion-Activated Night Lights with Home Assistant (No Code)"
+description: "Build motion-activated night light automations in Home Assistant with time-based brightness, configurable timeouts, and zero code. Complete YAML included."
+date: "2026-03-28"
+slug: "home-assistant-night-light-automation"
+keywords:
+  - home assistant night light automation
+  - motion activated night light
+  - home assistant motion sensor
+  - smart night light yaml
+  - home assistant automation
+---
+
+# Smart Motion-Activated Night Lights with Home Assistant (No Code)
+
+Motion-activated night lights are one of the most immediately useful smart home automations. Walk into a dark hallway at 2 AM and the lights come on at a dim, comfortable level. No fumbling for switches, no blinding yourself.
+
+This guide builds a production-quality night light automation in Home Assistant using YAML. It handles time-based brightness, multi-zone motion, configurable timeouts, and clean shut-off. No custom components, no Node-RED, no code — just native HA automations.
+
+This is running right now on my system using ELK M1 zone sensors as motion triggers and UPB lighting switches for the lights, but the pattern works with any motion sensor and any dimmable light in Home Assistant.
+
+## The Problem with Basic Night Lights
+
+Most "night light automation" tutorials give you something like this:
+
+```yaml
+automation:
+  - alias: basic_night_light
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.hallway_motion
+        to: "on"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.hallway
+```
+
+This is missing everything that matters:
+- It turns the light on at full brightness at any time of day
+- It never turns the light off
+- There is no brightness curve based on time
+- It does not handle multiple motion sensors in adjacent zones
+- It does not prevent the light from turning off while you are still in the room
+
+Let us fix all of that.
+
+## Step 1: Choose Your Hardware
+
+### Motion Sensors
+
+Any motion sensor that creates a `binary_sensor` entity in Home Assistant works. Common options:
+
+- **Zigbee**: Aqara P1, Philips Hue Motion, IKEA TRADFRI
+- **Z-Wave**: Zooz ZSE40, Aeotec MultiSensor 7
+- **WiFi**: ESP32 with PIR sensor (ESPHome)
+- **Wired**: ELK M1 zones with PIR sensors (what I use)
+
+The key spec is the "clear delay" — how long after motion stops before the sensor reports clear. Shorter is better for night lights. The Aqara P1 has a configurable 5-60 second reset. Most wired PIRs reset in 3-5 seconds.
+
+### Lights
+
+Any dimmable light entity works. The automation controls brightness via the `brightness` attribute (0-255 scale). If your lights do not dim, the automation still works — it just turns them on and off without brightness control.
+
+My system uses UPB (Universal Powerline Bus) switches which dim smoothly to 30% minimum. Most Zigbee and Z-Wave dimmers go lower.
+
+## Step 2: The Time-Based Brightness Curve
+
+The core idea: different brightness levels at different times of night. Nobody wants the same brightness at 10 PM (still winding down) as at 3 AM (eyes fully adjusted to dark).
+
+Here is the brightness curve I use:
+
+| Time Window | Brightness | Why |
+|------------|-----------|-----|
+| 10:00 PM - 11:59 PM | 30% (77/255) | Evening wind-down, eyes still adjusted to light |
+| 12:00 AM - 4:59 AM | 10% (25/255) | Deep night, minimum comfortable visibility |
+| 5:00 AM - 6:29 AM | 20% (51/255) | Pre-dawn, slightly brighter for morning routine |
+| 6:30 AM - sunrise | 40% (102/255) | Morning transition, approaching daylight |
+
+In Home Assistant, you implement this with a `choose` action block or a template.
+
+## Step 3: The Complete Automation
+
+Here is the full production YAML. This is one automation that handles everything.
+
+```yaml
+automation:
+  - alias: night_light_hallway
+    id: night_light_hallway
+    description: "Motion-activated hallway light with time-based brightness"
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.hallway_motion
+        to: "on"
+        id: motion_detected
+      - platform: state
+        entity_id: binary_sensor.hallway_motion
+        to: "off"
+        for:
+          minutes: 2
+        id: motion_cleared
+    condition:
+      # Only run during night hours
+      - condition: time
+        after: "22:00:00"
+        before: "06:30:00"
+    action:
+      - choose:
+          # Motion detected — turn on light
+          - conditions:
+              - condition: trigger
+                id: motion_detected
+            sequence:
+              - service: light.turn_on
+                target:
+                  entity_id: light.hallway
+                data:
+                  brightness: >-
+                    {% set hour = now().hour %}
+                    {% if hour >= 22 %}
+                      77
+                    {% elif hour < 5 %}
+                      25
+                    {% elif hour < 6 %}
+                      51
+                    {% else %}
+                      102
+                    {% endif %}
+                  transition: 1
+
+          # Motion cleared for 2 minutes — turn off
+          - conditions:
+              - condition: trigger
+                id: motion_cleared
+            sequence:
+              - service: light.turn_off
+                target:
+                  entity_id: light.hallway
+                data:
+                  transition: 3
+```
+
+### Key Design Decisions
+
+**`mode: restart`**: If motion is detected again while the automation is running (waiting for the 2-minute timeout), it restarts. This prevents the light from turning off while you are still moving through the area.
+
+**`for: minutes: 2` on the clear trigger**: The automation waits 2 minutes after the motion sensor reports clear before turning off the light. This gives you time to be still (sitting down, standing at a counter) without the light cutting out.
+
+**`transition: 1` on turn-on, `transition: 3` on turn-off**: The light fades on quickly (1 second) so you are not walking in the dark, but fades off slowly (3 seconds) so the transition is not jarring.
+
+**Template brightness**: The Jinja2 template in the brightness field evaluates at trigger time, so the brightness adjusts based on the current hour. If you walk through at 11 PM you get 30%. If you walk through at 3 AM you get 10%.
+
+## Step 4: Multi-Zone Motion
+
+If you have multiple motion sensors covering adjacent areas (hallway, stairway, landing), you can trigger from all of them and keep the light on as long as any sensor detects motion.
+
+```yaml
+trigger:
+  - platform: state
+    entity_id:
+      - binary_sensor.hallway_motion
+      - binary_sensor.stairway_motion
+      - binary_sensor.landing_motion
+    to: "on"
+    id: motion_detected
+  - platform: template
+    value_template: >-
+      {{ is_state('binary_sensor.hallway_motion', 'off')
+         and is_state('binary_sensor.stairway_motion', 'off')
+         and is_state('binary_sensor.landing_motion', 'off') }}
+    for:
+      minutes: 2
+    id: all_clear
+```
+
+The turn-off trigger now uses a template that checks all three sensors. The light only turns off when all sensors have been clear for 2 minutes.
+
+## Step 5: Using ELK M1 Zones as Motion Triggers
+
+If you have an ELK M1 alarm panel integrated with Home Assistant, your wired PIR motion sensors appear as `sensor.elkm1_zone_###` entities with states like "Normal" and "Violated."
+
+The trigger is slightly different because ELK zones are sensors, not binary sensors:
+
+```yaml
+trigger:
+  - platform: state
+    entity_id: sensor.elkm1_zone_026
+    to: "Violated"
+    id: motion_detected
+  - platform: state
+    entity_id: sensor.elkm1_zone_026
+    to: "Normal"
+    for:
+      minutes: 2
+    id: motion_cleared
+```
+
+"Violated" means motion detected. "Normal" means clear. Everything else in the automation stays the same.
+
+This is what my production system uses. The ELK zones are fast (sub-second state updates over the M1XEP) and extremely reliable since they are wired, not wireless.
+
+## Step 6: Adding Color Temperature
+
+If your lights support color temperature (most smart bulbs and some dimmers), you can make the night light warmer at deeper night hours. Warm light (2200K) is less disruptive to sleep than cool light (4000K).
+
+Add `color_temp_kelvin` to the turn-on action:
+
+```yaml
+- service: light.turn_on
+  target:
+    entity_id: light.hallway
+  data:
+    brightness: >-
+      {% set hour = now().hour %}
+      {% if hour >= 22 %}77{% elif hour < 5 %}25{% elif hour < 6 %}51{% else %}102{% endif %}
+    color_temp_kelvin: >-
+      {% set hour = now().hour %}
+      {% if hour >= 22 %}2500{% elif hour < 5 %}2200{% elif hour < 6 %}2400{% else %}3000{% endif %}
+    transition: 1
+```
+
+## Step 7: Preventing Daytime Triggers
+
+The `condition: time` block prevents the automation from running during the day. But what about edge cases like cloudy days when it is dark at 4 PM?
+
+You can add an illuminance condition if your motion sensor reports light levels:
+
+```yaml
+condition:
+  - condition: or
+    conditions:
+      - condition: time
+        after: "22:00:00"
+        before: "06:30:00"
+      - condition: numeric_state
+        entity_id: sensor.hallway_illuminance
+        below: 10
+```
+
+This runs the night light if it is either nighttime OR the room illuminance is below 10 lux (very dark). This catches dark closets, interior rooms, and overcast days.
+
+## Scaling to Multiple Rooms
+
+To deploy night lights across your house, duplicate the automation for each room/zone. Change the entity IDs and optionally adjust the brightness curve per room (bathrooms might want brighter, bedrooms dimmer).
+
+On my system, I have night light automations for:
+- Hallway (zones 026/027 triggering back blue dots and exterior door cans)
+- Bathroom
+- Kitchen
+- Stairway
+
+Each one uses the same template pattern with room-specific brightness values and timeouts.
+
+## The Quick Version
+
+If you just want to paste and go, here is the minimum viable night light:
+
+```yaml
+automation:
+  - alias: quick_night_light
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.YOUR_MOTION_SENSOR
+        to: "on"
+    condition:
+      - condition: time
+        after: "22:00:00"
+        before: "06:00:00"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.YOUR_LIGHT
+        data:
+          brightness: 50
+      - wait_for_trigger:
+          - platform: state
+            entity_id: binary_sensor.YOUR_MOTION_SENSOR
+            to: "off"
+            for:
+              minutes: 2
+      - service: light.turn_off
+        target:
+          entity_id: light.YOUR_LIGHT
+```
+
+Replace `YOUR_MOTION_SENSOR` and `YOUR_LIGHT` with your entity IDs. This gets you 80% of the way there.
+
+## Get the Full Pack
+
+The [Night Lights Automation Pack](https://beslain.gumroad.com/l/ha-night-lights-pack) includes pre-built automations for 6 room types, the brightness curve templates, a configuration guide, and the YAML packages ready to drop into your Home Assistant config.
+
+Related guides:
+- [How to Integrate ELK M1 with Home Assistant](/blog/elk-m1-home-assistant-complete-guide)
+- [How to Add a Custom Jarvis Voice to Home Assistant with Piper TTS](/blog/piper-tts-custom-voice-home-assistant)

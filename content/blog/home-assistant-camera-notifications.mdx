@@ -1,0 +1,309 @@
+---
+title: "How to Get Reliable Camera Push Notifications in Home Assistant"
+description: "Fix flaky camera notifications in Home Assistant once and for all. Covers RTSP setup, webhook-based motion detection, snapshot delivery, debouncing, and the exact notification patterns that work in production."
+date: "2026-03-31"
+slug: "home-assistant-camera-notifications"
+keywords:
+  - home assistant camera notifications
+  - home assistant camera push notification
+  - home assistant rtsp camera
+  - home assistant motion detection camera
+  - home assistant camera snapshot notification
+---
+
+# How to Get Reliable Camera Push Notifications in Home Assistant
+
+Camera notifications in Home Assistant have a reputation for being unreliable. Snapshots fail to load. Notifications fire 30 times in a row for one car driving by. Motion detection is either too sensitive or misses actual events. The notification arrives but the image shows the wrong camera.
+
+All of these are solvable. This guide covers the notification architecture that actually works in production, running on 4 IP cameras with zero missed events and no notification floods.
+
+## Why Camera Notifications Break
+
+Before fixing the problem, understand why the default approach fails.
+
+The typical setup:
+1. Camera RTSP stream in Home Assistant
+2. HA's built-in motion detection on the stream
+3. Automation that sends a notification when motion is detected
+
+This breaks because:
+
+- **HA's stream-based motion detection is CPU-heavy and inaccurate.** It is doing pixel-diff analysis on a decoded video stream. Shadows, lighting changes, and compression artifacts all trigger false positives.
+- **RTSP stream snapshots are unreliable.** If the stream is not actively being viewed, HA may not have a current frame cached. The snapshot action grabs a stale frame or times out.
+- **No debouncing.** One person walking across the frame triggers motion-start, motion-stop, motion-start repeatedly as they move behind objects. Each one fires the automation.
+
+The fix: use the camera's built-in motion detection (VCA), deliver events via webhooks, take snapshots directly from the camera (not the stream), and debounce properly.
+
+## Step 1: Use Camera-Side Motion Detection
+
+Every decent IP camera has built-in Video Content Analysis (VCA) — motion detection, line crossing, intrusion detection, or similar. This runs on the camera's DSP, not your Home Assistant hardware, and is far more accurate than stream-based detection.
+
+### Configure VCA on the Camera
+
+Log into your camera's web interface and find the motion detection or smart event settings. For Vivotek cameras:
+
+1. Navigate to Configuration > Event > Motion Detection
+2. Set the detection region (draw zones to exclude trees, sky, etc.)
+3. Set sensitivity to 70-80% (start here, adjust based on false positives)
+4. Set the minimum object size to filter out insects and small shadows
+
+For Hikvision, Dahua, Reolink, and Amcrest cameras, the VCA settings are in similar locations. The key is configuring the detection zone and sensitivity on the camera itself.
+
+### Deliver Events via Webhook
+
+The camera's VCA fires an event. You need that event to reach Home Assistant. There are two approaches:
+
+**Approach A: Camera HTTP webhook (preferred)**
+
+Most IP cameras can send an HTTP request when VCA triggers. Configure the camera to POST to a Home Assistant webhook:
+
+```
+http://YOUR_HA_IP:8123/api/webhook/front_camera_motion
+```
+
+In Home Assistant, create the webhook automation:
+
+```yaml
+automation:
+  - alias: front_camera_motion_webhook
+    trigger:
+      - platform: webhook
+        webhook_id: front_camera_motion
+        allowed_methods:
+          - POST
+          - GET
+        local_only: true
+    action:
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.front_camera_motion
+```
+
+The webhook fires a `input_boolean` which your notification automation watches. This decouples detection from notification, which is critical for debouncing.
+
+**Approach B: ONVIF events**
+
+If your camera supports ONVIF, the HA ONVIF integration can subscribe to motion events natively. Add the camera as an ONVIF device and you get `binary_sensor.camera_motion` entities automatically.
+
+ONVIF is cleaner when it works, but some cameras have buggy ONVIF implementations. Webhooks are more universally reliable.
+
+## Step 2: Take Snapshots Directly from the Camera
+
+Do not use `camera.snapshot` on an RTSP stream entity for notifications. The stream may not be active, and the snapshot quality depends on the sub-stream resolution.
+
+Instead, grab snapshots directly from the camera's CGI interface:
+
+```yaml
+# For Vivotek cameras
+shell_command:
+  snapshot_front: >
+    curl -s --digest -u root:password
+    "http://192.168.6.2/cgi-bin/viewer/video.jpg"
+    -o /config/www/snapshots/front_latest.jpg
+
+# For Hikvision cameras
+shell_command:
+  snapshot_front: >
+    curl -s --digest -u admin:password
+    "http://192.168.6.2/ISAPI/Streaming/channels/101/picture"
+    -o /config/www/snapshots/front_latest.jpg
+
+# For Dahua / Amcrest cameras
+shell_command:
+  snapshot_front: >
+    curl -s --digest -u admin:password
+    "http://192.168.6.2/cgi-bin/snapshot.cgi?channel=1"
+    -o /config/www/snapshots/front_latest.jpg
+```
+
+This grabs a full-resolution still image directly from the camera's sensor — not a frame from the video stream. It is faster, higher quality, and works regardless of whether anyone is viewing the stream.
+
+### Authentication Matters
+
+Most IP cameras use Digest authentication, not Basic. If your curl command returns a 401 or an empty file, you are probably using Basic auth (`-u user:pass` without `--digest`). Add the `--digest` flag.
+
+Some cameras (especially older Hikvision) also work with Basic auth, but Digest is more secure and more commonly required.
+
+## Step 3: Build the Notification Automation with Debouncing
+
+Here is the complete notification automation with proper debouncing:
+
+```yaml
+input_boolean:
+  front_camera_motion:
+    name: Front Camera Motion
+  front_camera_cooldown:
+    name: Front Camera Cooldown
+
+timer:
+  front_camera_cooldown_timer:
+    duration: "00:01:00"
+
+automation:
+  - alias: front_camera_motion_notify
+    trigger:
+      - platform: state
+        entity_id: input_boolean.front_camera_motion
+        to: "on"
+    condition:
+      - condition: state
+        entity_id: input_boolean.front_camera_cooldown
+        state: "off"
+    action:
+      # Start cooldown immediately
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.front_camera_cooldown
+      - service: timer.start
+        target:
+          entity_id: timer.front_camera_cooldown_timer
+
+      # Small delay for the person/vehicle to be fully in frame
+      - delay: "00:00:02"
+
+      # Grab snapshot directly from camera
+      - service: shell_command.snapshot_front
+
+      # Small delay for file to write
+      - delay: "00:00:01"
+
+      # Send notification with image
+      - service: notify.mobile_app_phone
+        data:
+          title: "Motion: Front Driveway"
+          message: "{{ now().strftime('%I:%M %p') }}"
+          data:
+            image: /local/snapshots/front_latest.jpg
+            actions:
+              - action: URI
+                title: "View Camera"
+                uri: "/lovelace/cameras"
+
+      # Reset motion boolean
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.front_camera_motion
+
+  # Reset cooldown when timer expires
+  - alias: front_camera_cooldown_reset
+    trigger:
+      - platform: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.front_camera_cooldown_timer
+    action:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.front_camera_cooldown
+```
+
+### Why This Works
+
+The architecture has three layers:
+
+1. **Camera VCA** detects motion and hits the webhook
+2. **Webhook** flips `input_boolean.front_camera_motion` to "on"
+3. **Notification automation** checks the cooldown gate, fires the notification, and starts the cooldown timer
+
+The cooldown timer (1 minute) prevents repeated notifications from the same event. One car driving by might trigger VCA 3-4 times as it enters, passes through, and exits the detection zone. Only the first trigger sends a notification.
+
+The 2-second delay before the snapshot gives the subject time to be fully in frame. Without it, you get snapshots of a half-visible person at the edge of the camera's view.
+
+## Step 4: RTSP Stream Setup for Live Viewing
+
+Notifications get you the alert. RTSP streams let you check in live. Set up the camera entities properly.
+
+### Generic Camera Entity (Snapshot + Sub-Stream)
+
+```yaml
+camera:
+  - platform: generic
+    name: Front Driveway
+    still_image_url: "http://192.168.6.2/cgi-bin/viewer/video.jpg"
+    stream_source: "rtsp://admin:password@192.168.6.2:554/live1s2.sdp"
+    authentication: digest
+    username: admin
+    password: !secret camera_password
+    verify_ssl: false
+```
+
+Use the **sub-stream** (`live1s2.sdp`, `Streaming/channels/102`, etc.) for the HA entity. The sub-stream is typically 640x480 or 1280x720, which is plenty for the HA dashboard and keeps CPU load low. The main stream at 2560x1920 will crush your HA instance if you try to decode it.
+
+Use the **main stream** for recording in your NVR. HA should never touch the main stream.
+
+### Stream URL Patterns by Brand
+
+| Brand | Main Stream | Sub Stream |
+|-------|-------------|------------|
+| Vivotek | `rtsp://ip/live1s1.sdp` | `rtsp://ip/live1s2.sdp` |
+| Hikvision | `rtsp://ip/Streaming/channels/101` | `rtsp://ip/Streaming/channels/102` |
+| Dahua/Amcrest | `rtsp://ip/cam/realmonitor?channel=1&subtype=0` | `rtsp://ip/cam/realmonitor?channel=1&subtype=1` |
+| Reolink | `rtsp://ip/h264Preview_01_main` | `rtsp://ip/h264Preview_01_sub` |
+| UniFi Protect | Managed through integration | Managed through integration |
+
+## Step 5: Notification Tapping Opens the Camera
+
+The notification should take you somewhere useful when tapped. On iOS, you can deep-link to the HA dashboard:
+
+```yaml
+data:
+  url: /lovelace/cameras
+```
+
+Or if you use the UniFi Protect app or NVR web interface:
+
+```yaml
+data:
+  url: "https://192.168.1.1/protect/cameras"
+```
+
+On Android, use `clickAction`:
+
+```yaml
+data:
+  clickAction: /lovelace/cameras
+```
+
+## Common Problems and Fixes
+
+### Snapshot Shows Black Image
+The camera is in night mode and the IR LEDs have not illuminated the scene. Add a 2-3 second delay after the motion trigger before grabbing the snapshot. The IR LEDs take a moment to reach full brightness.
+
+### Notification Arrives But No Image
+The image path is wrong or the file was not written. Check that `/config/www/snapshots/` exists and is writable. The `image` field in the notification uses `/local/` as the path prefix, which maps to `/config/www/` on disk.
+
+```bash
+mkdir -p /config/www/snapshots
+```
+
+### Too Many False Positives
+Reduce camera VCA sensitivity from 80% to 60%. Draw tighter detection zones that exclude areas with trees, flags, or other constant movement. Increase the minimum object size filter.
+
+### Notifications Stop After a While
+Some cameras drop the webhook configuration after firmware updates or reboots. Set the webhook URL in the camera and check it monthly. Alternatively, use ONVIF events which persist through reboots.
+
+### RTSP Stream Disconnects
+Add `rtsp_transport: tcp` to your generic camera configuration. UDP transport drops packets on congested networks. TCP is more reliable for streams traversing VLANs or busy switches.
+
+## Scaling to Multiple Cameras
+
+Duplicate the automation pattern for each camera. Use a consistent naming scheme:
+
+- `input_boolean.{location}_camera_motion`
+- `input_boolean.{location}_camera_cooldown`
+- `timer.{location}_camera_cooldown_timer`
+- `shell_command.snapshot_{location}`
+
+With 4 cameras, you have 4 webhook automations, 4 notification automations, and 4 cooldown resets. It is repetitive but each camera can have independent cooldown timers and sensitivity tuning.
+
+## Get the Full Camera + Security Setup
+
+The **ELK M1 HA Security Blueprint** includes the complete camera notification system — webhook patterns, debouncing, multi-camera configurations, and integration with alarm response automations. It is the same system described here, packaged as drop-in YAML.
+
+[Get the ELK M1 Security Blueprint](https://beslain.gumroad.com/l/elk-m1-ha-security-blueprint) — use code **LAUNCH50** for 50% off at launch.
+
+---
+
+**Want reliable automations delivered to your inbox?** The newsletter covers camera setups, alarm systems, and real-world HA engineering.
+
+[Subscribe to the newsletter →](https://theautomatedhome.beehiiv.com)
