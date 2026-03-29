@@ -1,241 +1,689 @@
 ---
-title: "20 Smart Home Automation Ideas for Beginners"
-description: "20 practical smart home automation ideas you can set up this weekend. From simple light schedules to motion-triggered alerts, each idea includes a difficulty rating and what you need to get started."
-date: "2026-03-28"
+title: "20 Smart Home Automation Ideas for Beginners (Organized by Room)"
+description: "20 practical smart home automation ideas organized by room — bedroom, kitchen, living room, garage, and whole house. Each includes what you need, why it works, and a Home Assistant YAML starter. No fluff, just automations worth building."
+date: "2026-04-02"
 slug: "smart-home-automation-ideas-beginners"
 keywords:
   - smart home automation ideas
+  - home assistant automation ideas
+  - smart home ideas beginners
   - home automation ideas
-  - home assistant ideas for beginners
+  - best smart home automations beginners
   - smart home automation examples
-  - best smart home automations for beginners
-  - smart home ideas 2026
 ---
 
-# 20 Smart Home Automation Ideas for Beginners
+# 20 Smart Home Automation Ideas for Beginners (Organized by Room)
 
-You bought some smart home gear. Maybe a few smart bulbs, a smart plug, a door sensor. Now what? The hardware is installed but your home is not actually "smart" yet -- it is just "remote controlled."
+Smart home automation gets interesting when you stop thinking about individual devices and start thinking about rooms and routines. A smart bulb by itself is a remote-controlled light. A smart bulb that knows what time it is, whether you are home, and what room you are in becomes something genuinely useful.
 
-The difference between a remote-controlled home and a smart home is automations. Automations are the rules that make your home act on its own: lights that turn on when you walk in, doors that lock at bedtime, fans that adjust to the temperature.
+These 20 automations are organized by room because that is how you actually live. Start with the room you spend the most time in, get those automations solid, then expand. Every automation here runs on Home Assistant and includes a YAML starter you can customize.
 
-Here are 20 automation ideas organized from dead simple to moderately complex. Each one includes what hardware you need and a difficulty rating. All of these work with Home Assistant, but the concepts apply to any platform.
+## Bedroom (5 Automations)
 
-## Simple (No Coding Required)
+### 1. Gradual Sunrise Wake-Up Light
 
-### 1. Turn Off Lights When You Leave
+Your bedroom light slowly brightens over 30 minutes before your alarm, simulating sunrise. You wake up naturally instead of being jarred by a buzzer.
 
-**What you need:** Smart bulbs or switches + phone with HA companion app
-**Difficulty:** Easy
-
-When your phone leaves the home Wi-Fi zone (or your GPS-based person entity changes to "not_home"), turn off all lights. This is the first automation everyone should build. It pays for itself in electricity savings within weeks.
-
-### 2. Porch Light at Sunset
-
-**What you need:** One smart outdoor light or switch
-**Difficulty:** Easy
-
-Use the sun trigger to turn on your porch light at sunset and off at sunrise (or at a set time like 11 PM). This adjusts automatically as days get shorter and longer throughout the year. No more seasonal timer updates.
+**What you need:** Any dimmable smart light (Zigbee, Z-Wave, or WiFi) + an `input_datetime` helper for your wake-up time.
 
 ```yaml
 automation:
-  - trigger:
-      - platform: sun
-        event: sunset
-        offset: "-00:15:00"
+  - alias: sunrise_wakeup
+    trigger:
+      - platform: time
+        at: input_datetime.wakeup_time
+    action:
+      - repeat:
+          count: 6
+          sequence:
+            - delay: "00:05:00"
+            - service: light.turn_on
+              target:
+                entity_id: light.bedroom
+              data:
+                brightness: "{{ 5 + (repeat.index * 25) }}"
+                kelvin: "{{ 2200 + (repeat.index * 200) }}"
+```
+
+Set the `input_datetime` to 30 minutes before you want to wake up. The light goes from barely-there warm amber to a moderate cool white. Add a weekday condition so it skips weekends.
+
+### 2. Bedtime Routine — One Tap
+
+A single toggle turns off the rest of the house, locks the doors, dims the bedroom to reading level, and sets the thermostat to sleep temperature. Twenty minutes later, the bedroom light turns off too.
+
+**What you need:** `input_boolean.bedtime` + any smart lights and locks you have.
+
+```yaml
+automation:
+  - alias: bedtime_routine
+    trigger:
+      - platform: state
+        entity_id: input_boolean.bedtime
+        to: "on"
+    action:
+      - service: light.turn_off
+        target:
+          entity_id: group.non_bedroom_lights
+      - service: light.turn_on
+        target:
+          entity_id: light.bedroom
+        data:
+          brightness: 40
+          kelvin: 2200
+      - service: climate.set_temperature
+        target:
+          entity_id: climate.bedroom
+        data:
+          temperature: 68
+      - delay: "00:20:00"
+      - service: light.turn_off
+        target:
+          entity_id: light.bedroom
+```
+
+Expose the `input_boolean` on your phone widget or a bedside button. One tap and the house goes to sleep mode.
+
+### 3. Night Light for Bathroom Trips
+
+Motion in the bedroom or hallway at night triggers a dim light. Bright enough to see, dim enough that you fall back asleep easily. The brightness curve changes throughout the night — dimmer at 2 AM than at 10 PM because your eyes are more dark-adapted.
+
+**What you need:** Motion sensor (even a $15 Zigbee one works) + dimmable hallway light.
+
+```yaml
+automation:
+  - alias: hallway_night_light
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.hallway_motion
+        to: "on"
+    condition:
+      - condition: time
+        after: "22:00:00"
+        before: "06:30:00"
     action:
       - service: light.turn_on
         target:
-          entity_id: light.front_porch
-```
-
-### 3. Morning Coffee Maker
-
-**What you need:** Smart plug + regular coffee maker (the kind with a physical on switch)
-**Difficulty:** Easy
-
-Prep the coffee maker the night before with water and grounds, leave the physical switch in the "on" position, and plug it into a smart plug. Schedule the smart plug to turn on at 6:30 AM. Wake up to fresh coffee.
-
-### 4. Bathroom Fan Timer
-
-**What you need:** Smart switch on the bathroom fan
-**Difficulty:** Easy
-
-When the bathroom light turns off, wait 10 minutes, then turn off the exhaust fan. No more fans running all night because someone forgot.
-
-### 5. Bedtime Light Dimmer
-
-**What you need:** Smart bulbs that support dimming
-**Difficulty:** Easy
-
-At 9 PM, gradually dim all living area lights to 40%. At 10 PM, dim to 20%. This cues your body for sleep without you having to think about it.
-
-## Moderate (Some Templating)
-
-### 6. Welcome Home Lights
-
-**What you need:** Smart lights + phone presence detection
-**Difficulty:** Moderate
-
-When you arrive home after sunset, turn on the entryway and living room lights to 80%. During the day, skip the automation. Add a 5-minute delay then dim to your preferred level.
-
-### 7. Movie Night
-
-**What you need:** Smart lights + media player integration (Apple TV, Chromecast, Roku, etc.)
-**Difficulty:** Moderate
-
-When your media player starts playing after sunset, dim the living room lights to 10%. When playback stops or pauses, bring them back to 60%. Instant cinema mode, every time.
-
-### 8. Garage Door Left Open
-
-**What you need:** Garage door sensor (contact sensor or tilt sensor) + smart notification
-**Difficulty:** Moderate
-
-If the garage door has been open for more than 15 minutes, send a phone notification. If you have a smart garage opener, add a "Close it" button right in the notification.
-
-### 9. Package Delivery Alert
-
-**What you need:** Outdoor motion sensor or doorbell camera
-**Difficulty:** Moderate
-
-When motion is detected at the front door between 10 AM and 6 PM on weekdays, send a notification with a camera snapshot. Rate-limit to one alert per 30 minutes so you are not spammed by passing cars.
-
-### 10. Washing Machine Done
-
-**What you need:** Smart plug with energy monitoring
-**Difficulty:** Moderate
-
-Your washing machine draws 300-500W while running and under 5W when idle. Monitor the power sensor: when it drops below 10W and stays there for 3 minutes (after being above 10W), the cycle is done. Send a notification to move the laundry.
-
-```yaml
-automation:
-  - trigger:
-      - platform: numeric_state
-        entity_id: sensor.washer_plug_power
-        below: 10
-        for:
-          minutes: 3
-    condition:
-      - condition: state
-        entity_id: input_boolean.washer_running
-        state: "on"
-    action:
-      - service: notify.mobile_app_your_phone
+          entity_id: light.hallway
         data:
-          message: "Washing machine finished. Move the laundry!"
-      - service: input_boolean.turn_off
+          brightness: >
+            {% set hour = now().hour %}
+            {% if hour >= 22 or hour < 1 %}50
+            {% elif hour < 5 %}20
+            {% else %}70{% endif %}
+          kelvin: 2200
+      - wait_for_trigger:
+          - platform: state
+            entity_id: binary_sensor.hallway_motion
+            to: "off"
+            for: "00:02:00"
+      - service: light.turn_off
         target:
-          entity_id: input_boolean.washer_running
+          entity_id: light.hallway
 ```
 
-### 11. Night Light on Motion
+### 4. Fan Control by Temperature
 
-**What you need:** Motion sensor + smart light (hallway, bathroom, or kitchen)
-**Difficulty:** Moderate
+Your bedroom fan turns on when the room gets too warm and turns off when it cools down.
 
-Between 10 PM and 6 AM, if motion is detected in the hallway, turn on a light at 5% brightness with warm white color temperature. Turn it off 2 minutes after motion clears. Just enough light to see without waking yourself up.
-
-### 12. Door Left Open Warning
-
-**What you need:** Contact sensor on any exterior door
-**Difficulty:** Moderate
-
-If a door is open for more than 5 minutes, send a notification. If it is still open after 10 minutes, send another. Keep repeating until it is closed. Critical for the back door that kids leave open, or the side door you forget about.
-
-### 13. Low Battery Alert
-
-**What you need:** Any battery-powered smart devices
-**Difficulty:** Moderate
-
-Once a day, scan all battery sensors. If any are below 20%, send a single notification listing every device that needs attention. Much better than finding out your door sensor battery died when you actually need it.
-
-### 14. Rain Forecast, Close Windows Reminder
-
-**What you need:** Weather integration (OpenWeatherMap, etc.)
-**Difficulty:** Moderate
-
-At 7 AM, check today's forecast. If rain is predicted, send a reminder to close the windows. If you have motorized window openers, close them automatically.
-
-### 15. Guest Wi-Fi Toggle
-
-**What you need:** Router with API access (UniFi, OpenWrt, etc.) or a smart plug on your guest AP
-**Difficulty:** Moderate
-
-Create a toggle in your HA dashboard that enables/disables the guest Wi-Fi network. Share the password via a QR code on the dashboard. Turn it off when guests leave.
-
-## Advanced (Multiple Devices + Logic)
-
-### 16. Goodnight Routine
-
-**What you need:** Smart lights + smart locks + alarm panel + thermostat
-**Difficulty:** Advanced
-
-One button does everything: turn off all lights (except dim bedroom), lock every door, arm the alarm, set the thermostat to sleep mode, turn off TVs, close the garage. Expose the button to your voice assistant so you can say "Hey Siri, goodnight" from bed.
-
-### 17. Window Open, HVAC Off
-
-**What you need:** Window contact sensors + smart thermostat
-**Difficulty:** Advanced
-
-When a window sensor opens, remember the current HVAC mode, then turn off the thermostat. When all windows close again, restore the previous mode. Saves energy and stops your AC from fighting the outdoor air. The tricky part is tracking the "previous mode" and handling multiple windows.
-
-### 18. Adaptive Lighting Throughout the Day
-
-**What you need:** Smart lights that support color temperature
-**Difficulty:** Advanced
-
-Morning: cool white (5000K) to help you wake up. Afternoon: neutral (4000K). Evening: warm (3000K). Late night: very warm and dim (2200K, 20%). Run on a 30-minute timer that adjusts brightness and color temperature based on the current hour. Your eyes adjust naturally.
-
-### 19. Security Motion Alert When Away
-
-**What you need:** Indoor motion sensors + cameras + phone notifications
-**Difficulty:** Advanced
-
-When nobody is home and an indoor motion sensor triggers, snap a photo from the nearest camera and send it as a critical push notification. Rate-limit to avoid flooding during a single event. This is your basic DIY security camera system.
-
-### 20. Morning Briefing
-
-**What you need:** Smart speaker + weather integration + calendar integration
-**Difficulty:** Advanced
-
-At 7 AM on weekdays, speak a summary through your kitchen speaker: today's weather, high and low temperatures, any doors or windows left open, garage status, and calendar events. This replaces the habit of checking your phone first thing in the morning.
+**What you need:** Smart fan (or fan + smart plug) + temperature sensor.
 
 ```yaml
 automation:
-  - trigger:
-      - platform: time
-        at: "07:00:00"
+  - alias: bedroom_fan_auto
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.bedroom_temperature
+        above: 74
+    action:
+      - service: fan.turn_on
+        target:
+          entity_id: fan.bedroom
+        data:
+          percentage: 50
+
+  - alias: bedroom_fan_off
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.bedroom_temperature
+        below: 71
+    action:
+      - service: fan.turn_off
+        target:
+          entity_id: fan.bedroom
+```
+
+The 3-degree gap between on (74) and off (71) prevents the fan from cycling on and off rapidly. This is called hysteresis and it matters for any threshold-based automation.
+
+### 5. Weekend Alarm Override
+
+If it is Saturday or Sunday, skip the sunrise wake-up automation entirely. Add this condition to automation #1:
+
+```yaml
+condition:
+  - condition: time
+    weekday:
+      - mon
+      - tue
+      - wed
+      - thu
+      - fri
+```
+
+Or use a separate `input_boolean.alarm_enabled` that you toggle from the dashboard. More flexible than hard-coding weekdays — handles holidays and sick days too.
+
+## Kitchen (4 Automations)
+
+### 6. Under-Cabinet Lights on Motion
+
+Kitchen counter lights turn on when you walk in and stay on while you are cooking. Turn off 5 minutes after the last motion.
+
+**What you need:** Motion sensor + LED strip or under-cabinet lights.
+
+```yaml
+automation:
+  - alias: kitchen_counter_lights
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.kitchen_motion
+        to: "on"
+    condition:
+      - condition: numeric_state
+        entity_id: sensor.kitchen_illuminance
+        below: 100
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.kitchen_counter
+        data:
+          brightness: 200
+      - wait_for_trigger:
+          - platform: state
+            entity_id: binary_sensor.kitchen_motion
+            to: "off"
+            for: "00:05:00"
+      - service: light.turn_off
+        target:
+          entity_id: light.kitchen_counter
+```
+
+The illuminance condition prevents the lights from turning on when the kitchen is already bright from daylight. Without it, the lights fire every time you walk in, day or night.
+
+### 7. Dishwasher Done Notification
+
+A power monitoring smart plug on the dishwasher detects when the cycle ends.
+
+**What you need:** Smart plug with power monitoring (Sonoff S31 or Zigbee equivalent).
+
+```yaml
+automation:
+  - alias: dishwasher_done
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.dishwasher_power
+        below: 3
+        for: "00:05:00"
+    condition:
+      - condition: numeric_state
+        entity_id: sensor.dishwasher_power
+        above: 0.5
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "Dishwasher Done"
+          message: "Cycle complete. Time to unload."
+```
+
+The 5-minute `for` duration prevents false triggers during the pause between wash and dry cycles. The `above: 0.5` condition ensures this only fires when the dishwasher was actually running, not when it is idle and plugged in.
+
+### 8. Coffee Machine Pre-Heat
+
+Your coffee machine turns on 10 minutes before your alarm so it is hot when you get to the kitchen.
+
+**What you need:** Coffee machine with physical on switch + smart plug.
+
+```yaml
+automation:
+  - alias: coffee_preheat
+    trigger:
+      - platform: template
+        value_template: >
+          {{ now().strftime('%H:%M') ==
+             (states('input_datetime.wakeup_time') | as_datetime - timedelta(minutes=10)).strftime('%H:%M') }}
     condition:
       - condition: time
         weekday: [mon, tue, wed, thu, fri]
     action:
-      - service: tts.speak
+      - service: switch.turn_on
         target:
-          entity_id: media_player.kitchen_speaker
-        data:
-          message: >-
-            Good morning. It is currently
-            {{ state_attr('weather.home', 'temperature') }} degrees
-            and {{ states('weather.home') }}.
-            {% if is_state('cover.garage_door', 'open') %}
-            The garage door is open.
-            {% endif %}
-            Have a great day.
+          entity_id: switch.coffee_machine
 ```
+
+Only works with drip machines that start brewing when power is applied. Pod machines need a button press.
+
+### 9. Stove Left On Alert
+
+If your stove is still drawing power after 2 hours, send a critical notification.
+
+**What you need:** Smart range with HA integration or high-wattage power monitoring plug.
+
+```yaml
+automation:
+  - alias: stove_on_too_long
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.stove_power
+        above: 500
+        for: "02:00:00"
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "Stove Still On"
+          message: "The stove has been drawing power for over 2 hours."
+          data:
+            push:
+              sound:
+                name: alarm.caf
+                critical: 1
+                volume: 1.0
+```
+
+The critical notification bypasses Do Not Disturb. For something safety-related, you want that.
+
+## Living Room (4 Automations)
+
+### 10. Movie Mode Scene
+
+One button dims the lights, turns on a warm TV backlight, and silences the house.
+
+**What you need:** Dimmable lights + (optional) bias lighting behind TV.
+
+```yaml
+script:
+  movie_mode:
+    sequence:
+      - service: light.turn_on
+        target:
+          entity_id: light.tv_backlight
+        data:
+          brightness: 40
+          rgb_color: [255, 147, 41]
+      - service: light.turn_off
+        target:
+          entity_id:
+            - light.living_room_ceiling
+            - light.living_room_lamp
+      - service: media_player.turn_on
+        target:
+          entity_id: media_player.living_room_tv
+```
+
+Expose this as a button on your dashboard or assign it to a physical scene controller.
+
+### 11. TV Auto-Dim and Restore
+
+When the TV starts playing, the room dims. When it turns off, lights come back — but only after sunset.
+
+**What you need:** Smart TV that reports state + dimmable room lights.
+
+```yaml
+automation:
+  - alias: tv_on_dim_lights
+    trigger:
+      - platform: state
+        entity_id: media_player.living_room_tv
+        to: "playing"
+    condition:
+      - condition: sun
+        after: sunset
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.living_room_ceiling
+        data:
+          brightness: 30
+
+  - alias: tv_off_restore_lights
+    trigger:
+      - platform: state
+        entity_id: media_player.living_room_tv
+        to: "off"
+    condition:
+      - condition: sun
+        after: sunset
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.living_room_ceiling
+        data:
+          brightness: 180
+```
+
+The sunset condition on both automations prevents them from fighting with daylight.
+
+### 12. Late Night Volume Cap
+
+TV volume is automatically capped after 10 PM. No more waking up the house.
+
+**What you need:** Media player that supports volume control in HA.
+
+```yaml
+automation:
+  - alias: late_night_volume_cap
+    trigger:
+      - platform: state
+        entity_id: media_player.living_room_tv
+        attribute: volume_level
+    condition:
+      - condition: time
+        after: "22:00:00"
+        before: "07:00:00"
+      - condition: template
+        value_template: >
+          {{ state_attr('media_player.living_room_tv', 'volume_level') | float > 0.3 }}
+    action:
+      - service: media_player.volume_set
+        target:
+          entity_id: media_player.living_room_tv
+        data:
+          volume_level: 0.3
+```
+
+### 13. Lights Follow Sunset
+
+Living room lights automatically turn on 15 minutes before sunset and off at bedtime. No seasonal schedule adjustments needed.
+
+**What you need:** Any smart light + presence detection.
+
+```yaml
+automation:
+  - alias: sunset_lights_on
+    trigger:
+      - platform: sun
+        event: sunset
+        offset: "-00:15:00"
+    condition:
+      - condition: state
+        entity_id: person.your_name
+        state: "home"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: group.living_room_lights
+        data:
+          brightness: 200
+```
+
+The presence condition prevents lights from turning on in an empty house.
+
+## Garage (3 Automations)
+
+### 14. Left Open Escalating Alert
+
+Garage door open for 10 minutes: notification with a "Close It" button. Still open after 30 minutes: auto-close.
+
+**What you need:** Smart garage door opener (MyQ, Ratgdo, or relay + tilt sensor).
+
+```yaml
+automation:
+  - alias: garage_left_open
+    trigger:
+      - platform: state
+        entity_id: cover.garage
+        to: "open"
+        for: "00:10:00"
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "Garage Open"
+          message: "Garage has been open for 10 minutes."
+          data:
+            actions:
+              - action: CLOSE_GARAGE
+                title: "Close It"
+      - wait_for_trigger:
+          - platform: state
+            entity_id: cover.garage
+            to: "closed"
+        timeout: "00:20:00"
+        continue_on_timeout: true
+      - condition: state
+        entity_id: cover.garage
+        state: "open"
+      - service: cover.close_cover
+        target:
+          entity_id: cover.garage
+      - service: notify.mobile_app_phone
+        data:
+          message: "Garage auto-closed after 30 minutes."
+```
+
+The actionable notification button lets you close it without opening the HA app.
+
+### 15. Auto-Close When Leaving
+
+Garage closes automatically 5 minutes after you leave home. The delay prevents false triggers from GPS bounce.
+
+**What you need:** Garage door control + phone presence.
+
+```yaml
+automation:
+  - alias: garage_close_on_leave
+    trigger:
+      - platform: state
+        entity_id: person.your_name
+        from: "home"
+        for: "00:05:00"
+    condition:
+      - condition: state
+        entity_id: cover.garage
+        state: "open"
+    action:
+      - service: cover.close_cover
+        target:
+          entity_id: cover.garage
+      - service: notify.mobile_app_phone
+        data:
+          message: "Garage closed — you left home."
+```
+
+### 16. Arrival Light Path
+
+When the garage opens after sunset, turn on the path lights from the garage through the house. Off after 5 minutes.
+
+**What you need:** Garage door sensor + lights along entry path.
+
+```yaml
+automation:
+  - alias: garage_arrival_lights
+    trigger:
+      - platform: state
+        entity_id: cover.garage
+        to: "open"
+    condition:
+      - condition: sun
+        after: sunset
+    action:
+      - service: light.turn_on
+        target:
+          entity_id:
+            - light.garage
+            - light.mudroom
+            - light.hallway
+        data:
+          brightness: 180
+      - delay: "00:05:00"
+      - service: light.turn_off
+        target:
+          entity_id:
+            - light.garage
+            - light.mudroom
+            - light.hallway
+```
+
+## Whole House (4 Automations)
+
+### 17. Leaving Home Lockdown
+
+When everyone leaves, the house locks itself: garage closes, doors lock, lights off, alarm arms.
+
+**What you need:** Presence detection + whatever smart devices you own.
+
+```yaml
+automation:
+  - alias: everyone_left
+    trigger:
+      - platform: state
+        entity_id: zone.home
+        to: "0"
+        for: "00:05:00"
+    action:
+      - service: light.turn_off
+        target:
+          entity_id: all
+      - service: cover.close_cover
+        target:
+          entity_id: cover.garage
+      - service: lock.lock
+        target:
+          entity_id: all
+      - service: notify.mobile_app_phone
+        data:
+          message: "House secured. Everyone has left."
+```
+
+The 5-minute `for` duration is critical. Phone GPS occasionally jitters and shows you "away" for a few seconds. Without the delay, you get false lockdowns while sitting on the couch.
+
+### 18. Water Leak Emergency
+
+A water sensor under the sink, near the water heater, or in the basement detects a leak and sends a critical alert.
+
+**What you need:** Water leak sensor (Aqara is $15) + (optional) smart water valve.
+
+```yaml
+automation:
+  - alias: water_leak_alert
+    trigger:
+      - platform: state
+        entity_id:
+          - binary_sensor.kitchen_water_leak
+          - binary_sensor.basement_water_leak
+          - binary_sensor.water_heater_leak
+        to: "on"
+    action:
+      - parallel:
+          - service: switch.turn_off
+            target:
+              entity_id: switch.main_water_valve
+          - service: notify.mobile_app_phone
+            data:
+              title: "WATER LEAK"
+              message: "{{ trigger.to_state.name }} detected at {{ now().strftime('%I:%M %p') }}"
+              data:
+                push:
+                  sound:
+                    name: alarm.caf
+                    critical: 1
+                    volume: 1.0
+```
+
+Even without a smart water valve, the critical notification gets you moving immediately.
+
+### 19. Weekly System Health Check
+
+Every Sunday, HA scans for offline devices and dead batteries. One notification covers everything that needs attention.
+
+```yaml
+automation:
+  - alias: weekly_health_check
+    trigger:
+      - platform: time
+        at: "09:00:00"
+    condition:
+      - condition: time
+        weekday:
+          - sun
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "Weekly System Check"
+          message: >
+            Unavailable: {{ states | selectattr('state', 'eq', 'unavailable') | list | count }} entities
+            {% for entity in states | selectattr('state', 'eq', 'unavailable') | list %}
+            - {{ entity.name }}
+            {% endfor %}
+            Low battery:
+            {% for state in states.sensor if 'battery' in state.entity_id and state.state | int < 20 %}
+            - {{ state.name }}: {{ state.state }}%
+            {% endfor %}
+```
+
+This catches devices that died silently during the week. A sensor with a dead battery still shows its last value — it does not tell you it is dead. This automation finds those.
+
+### 20. Vacation Occupancy Simulation
+
+A toggle simulates someone being home: lights turn on and off at randomized times, blinds operate on schedule.
+
+**What you need:** `input_boolean.vacation_mode` + smart lights.
+
+```yaml
+automation:
+  - alias: vacation_simulate_evening
+    trigger:
+      - platform: time
+        at: "19:00:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.vacation_mode
+        state: "on"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.living_room
+      - delay:
+          minutes: "{{ range(30, 90) | random }}"
+      - service: light.turn_on
+        target:
+          entity_id: light.kitchen
+      - delay:
+          minutes: "{{ range(60, 120) | random }}"
+      - service: light.turn_off
+        target:
+          entity_id: light.living_room
+      - delay:
+          minutes: "{{ range(30, 60) | random }}"
+      - service: light.turn_off
+        target:
+          entity_id: all
+```
+
+The randomized delays prevent a robotic pattern. A light that turns on at exactly 7:00 PM and off at exactly 10:00 PM every night looks automated. Random variation looks human.
 
 ## Where to Start
 
-If you are new to smart home automation, pick three from the Simple category and get them running this weekend. Once those are working and you trust the system, move to Moderate. The key is starting with automations that solve a real annoyance -- not automations that sound cool but you will never notice.
+Do not try to build all 20 at once. Start with these three — they deliver the most value for the least effort:
 
-The three I recommend starting with:
+1. **Night lights (#3)** — immediate daily value, simple to set up
+2. **Garage left open (#14)** — prevents a real problem every homeowner has
+3. **Leaving home lockdown (#17)** — security + convenience in one automation
 
-1. **Porch Light at Sunset** -- instant set-and-forget value
-2. **Bedtime Light Dimmer** -- you will feel the difference in your sleep
-3. **Garage Door Left Open** -- prevents the thing everyone worries about
+Once those are solid and you trust the system, expand to the room where you spend the most time.
 
-## Get All 25 as Ready-to-Paste YAML
+## The Key Principle
 
-If you want to skip the building phase and get 25 of the most useful automations as production-ready YAML files (including most of the ideas above plus more), check out the **[HA Automation Cookbook](https://beslain.gumroad.com/l/ha-automation-cookbook)**. Every file is commented with exactly what to customize, works as a standalone package, and includes any required helpers.
+Good automations are invisible. If you notice them, they are either broken or misconfigured. The goal is a house that just works — lights that are on when you need them and off when you do not, doors that lock when they should, and alerts that only fire when something actually needs your attention.
 
-For night light automations specifically, the **[Night Lights Pack](https://beslain.gumroad.com/l/ha-night-lights-pack)** has 5 ready-made night light automations with motion detection, ambient light conditions, and configurable brightness/color.
+Every automation on this list follows that principle. No novelty, no "look what my house can do" party tricks. Just automations that make your house better to live in.
 
-**Use code LAUNCH50 for 50% off either product.**
+## Get Pre-Built Automation Packs
+
+If you want these automations production-tested and ready to drop into your system, with proper error handling, helper entities, and documentation:
+
+- [Home Assistant Automation Cookbook](https://beslain.gumroad.com) — 25+ automations as drop-in YAML packages. Use code **LAUNCH50** for 50% off.
+- [Night Lights Pack](https://beslain.gumroad.com/l/ha-night-lights-pack) — The polished version of automation #3 with multi-room support and time-based brightness curves. Use code **LAUNCH50** for 50% off.
+- [Complete Bundle](https://beslain.gumroad.com) — Everything at a discount. Use code **LAUNCH50** for 50% off.
+
+---
+
+**New to Home Assistant?** The newsletter sends one automation per week with full YAML, explanations, and real-world tips from a production smart home.
+
+[Subscribe to the newsletter →](https://theautomatedhome.beehiiv.com)
