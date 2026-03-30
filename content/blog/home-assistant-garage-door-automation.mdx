@@ -1,0 +1,407 @@
+---
+title: "Home Assistant Garage Door Automation: Auto-Close, Notifications, and Actionable Controls"
+description: "Build production-quality garage door automations in Home Assistant — auto-close with audible warning, departure/arrival notifications, actionable push notifications with a Keep Open option, and a kill switch. Complete YAML included."
+date: "2026-04-04"
+slug: "home-assistant-garage-door-automation"
+keywords:
+  - home assistant garage door
+  - home assistant garage automation
+  - smart garage door home assistant
+  - garage auto close home assistant
+---
+
+# Home Assistant Garage Door Automation: Auto-Close, Notifications, and Actionable Controls
+
+A garage door left open is a security hole, an invitation for pests, and — in summer — an HVAC disaster. It is also one of the easiest things to automate in Home Assistant once you understand the `cover` entity and a few proven patterns.
+
+This guide covers the full garage door automation stack: hardware options, auto-close with an audible warning, departure and arrival notifications, actionable push notifications with a "Keep Open" action, and the timer cooldown + kill switch patterns that keep things from going sideways.
+
+I run two garage doors (`cover.garage_bay_1` and `cover.garage_bay_2`) on a production Home Assistant system with 700+ entities. Everything here is tested and running daily.
+
+## Hardware Options
+
+You need two things: a way to trigger the garage door opener and a way to know whether the door is open or closed.
+
+### Controller Options
+
+**ratgdo (recommended)**
+Open-source board that wires directly to the garage door opener's logic bus. Supports Security+ 2.0 (Chamberlain/LiftMaster), dry contact openers, and gives you open/close/stop control plus obstruction detection. ESPHome firmware. Around $30-35.
+
+**Meross MSG200**
+WiFi garage controller with a built-in tilt sensor. Works through the Meross integration or local-only via MQTT. Easy install — magnetic sensor on the door, controller near the opener. Around $40-50.
+
+**Shelly 1 / Shelly Plus 1**
+WiFi relay that triggers the opener's button terminals. You wire it to the same two terminals as your wall button. Does not include a sensor — pair it with a separate reed switch or tilt sensor. Around $12-15 plus sensor cost.
+
+**Dry Contact Relay + Reed Switch (DIY)**
+Any ESP32 or Zigbee relay for the trigger, plus a reed switch on the door for state. More wiring, more flexibility. ESPHome makes this straightforward. Total cost under $20 if you have an ESP32 on hand.
+
+All of these create a `cover` entity in Home Assistant. That is the entity type you will automate against.
+
+### The Cover Entity
+
+Garage doors appear as `cover.*` entities with two key states: `open` and `closed`. Some controllers also report `opening` and `closing` as transitional states.
+
+The services you use:
+- `cover.open_cover` — opens the door
+- `cover.close_cover` — closes the door
+- `cover.toggle` — toggles the current state
+
+Check your entity in Developer Tools > States. Confirm that it reports `open` when the door is up and `closed` when it is down. If it is inverted, fix it in the device configuration before building automations. Everything downstream depends on accurate state.
+
+## Helper Entities
+
+Before building the automations, create these helpers. They give you a kill switch and a cooldown timer that prevents notification floods.
+
+```yaml
+# In configuration.yaml or a package file
+input_boolean:
+  garage_auto_close_enabled:
+    name: Garage Auto-Close Enabled
+    icon: mdi:garage-alert
+
+timer:
+  garage_notification_cooldown:
+    name: Garage Notification Cooldown
+    duration: "00:05:00"
+    icon: mdi:timer-outline
+```
+
+`garage_auto_close_enabled` is your kill switch. Turn it off when you are doing yard work or loading the car and do not want the door closing on you. Expose it to your dashboard or HomeKit for quick access.
+
+`garage_notification_cooldown` prevents duplicate notifications. After one notification fires, the timer starts. No more notifications until it expires. Five minutes is a reasonable default — adjust based on how often you open the doors.
+
+## Automation 1: Auto-Close with Warning
+
+The most important garage automation. If a door has been open for 10 minutes with no activity, close it — but warn first so nobody gets hit.
+
+```yaml
+automation:
+  - alias: garage_auto_close_with_warning
+    id: garage_auto_close_with_warning
+    description: "Close garage doors after 10 minutes open, with 30-second audible warning"
+    mode: parallel
+    max: 2
+    trigger:
+      - platform: state
+        entity_id:
+          - cover.garage_bay_1
+          - cover.garage_bay_2
+        to: "open"
+        for:
+          minutes: 10
+    condition:
+      - condition: state
+        entity_id: input_boolean.garage_auto_close_enabled
+        state: "on"
+    action:
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "Garage Auto-Close Warning"
+          message: >
+            {{ trigger.to_state.name }} closing in 30 seconds.
+          data:
+            push:
+              interruption-level: time-sensitive
+      - service: tts.speak
+        target:
+          entity_id: tts.piper
+        data:
+          media_player_entity_id: media_player.garage_speaker
+          message: "Attention. Garage door closing in 30 seconds."
+      - delay:
+          seconds: 30
+      - condition: state
+        entity_id: "{{ trigger.entity_id }}"
+        state: "open"
+      - condition: state
+        entity_id: input_boolean.garage_auto_close_enabled
+        state: "on"
+      - service: cover.close_cover
+        target:
+          entity_id: "{{ trigger.entity_id }}"
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "Garage Closed"
+          message: "{{ trigger.to_state.name }} auto-closed after 10 minutes."
+```
+
+Key details:
+
+- **`mode: parallel`** with `max: 2` — both doors can auto-close independently at the same time.
+- **30-second warning** — a TTS announcement and a phone notification before the close command. If you do not have a speaker in the garage, remove the TTS call and rely on the phone notification.
+- **Re-check conditions after delay** — after the 30-second warning, the automation re-checks that the door is still open AND the kill switch is still on. If you manually closed the door or flipped the kill switch during the warning, it aborts.
+- **Template entity ID** — `{{ trigger.entity_id }}` makes one automation handle both doors. The trigger tells the automation which door has been open.
+
+If you do not have TTS set up, remove the `tts.speak` block. The automation works fine with just the phone notification as the warning.
+
+### Tuning the Timer
+
+10 minutes is a good starting point. If you have pets that wander in and out, go longer (15-20 minutes). If security is the priority, go shorter (5 minutes). The warning period gives you time to override regardless.
+
+## Automation 2: Departure Notification
+
+Get a notification when you leave home with a garage door still open. This catches the "drove away and forgot" scenario.
+
+```yaml
+automation:
+  - alias: garage_open_departure_alert
+    id: garage_open_departure_alert
+    description: "Alert when leaving home with garage door open"
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: person.baily_aldea
+        from: "home"
+        to: "not_home"
+    condition:
+      - condition: or
+        conditions:
+          - condition: state
+            entity_id: cover.garage_bay_1
+            state: "open"
+          - condition: state
+            entity_id: cover.garage_bay_2
+            state: "open"
+    action:
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "Garage Left Open"
+          message: >
+            You left home with
+            {% set open_doors = [] %}
+            {% if is_state('cover.garage_bay_1', 'open') %}
+              {% set open_doors = open_doors + ['Bay 1'] %}
+            {% endif %}
+            {% if is_state('cover.garage_bay_2', 'open') %}
+              {% set open_doors = open_doors + ['Bay 2'] %}
+            {% endif %}
+            {{ open_doors | join(' and ') }} open.
+          data:
+            actions:
+              - action: CLOSE_ALL_GARAGE
+                title: "Close All"
+                destructive: true
+            push:
+              interruption-level: time-sensitive
+```
+
+This pairs with a companion automation that handles the action response:
+
+```yaml
+automation:
+  - alias: garage_handle_close_all_action
+    id: garage_handle_close_all_action
+    description: "Handle Close All action from departure notification"
+    mode: single
+    trigger:
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: CLOSE_ALL_GARAGE
+    action:
+      - service: cover.close_cover
+        target:
+          entity_id:
+            - cover.garage_bay_1
+            - cover.garage_bay_2
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "Garage"
+          message: "All doors closing."
+```
+
+The `person` entity is the trigger. When Home Assistant detects you have left the home zone (via the companion app or a device tracker), it checks if any door is open and sends an actionable notification. Tap "Close All" from your phone and both doors close remotely.
+
+The `destructive: true` flag colors the button red on iOS. This is a safety measure — you do not want to accidentally tap it.
+
+## Automation 3: Arrival Notification
+
+The inverse. Get notified when you arrive home and the garage is closed, so you can open it from your phone before you pull into the driveway.
+
+```yaml
+automation:
+  - alias: garage_arrival_notification
+    id: garage_arrival_notification
+    description: "Offer to open garage when arriving home"
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: person.baily_aldea
+        to: "home"
+    condition:
+      - condition: state
+        entity_id: cover.garage_bay_1
+        state: "closed"
+      - condition: state
+        entity_id: timer.garage_notification_cooldown
+        state: "idle"
+    action:
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "Welcome Home"
+          message: "Garage is closed. Open Bay 1?"
+          data:
+            actions:
+              - action: OPEN_GARAGE_BAY_1
+                title: "Open Bay 1"
+            push:
+              interruption-level: time-sensitive
+      - service: timer.start
+        target:
+          entity_id: timer.garage_notification_cooldown
+```
+
+And the action handler:
+
+```yaml
+automation:
+  - alias: garage_handle_open_bay_1_action
+    id: garage_handle_open_bay_1_action
+    description: "Handle Open Bay 1 action from arrival notification"
+    mode: single
+    trigger:
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: OPEN_GARAGE_BAY_1
+    action:
+      - service: cover.open_cover
+        target:
+          entity_id: cover.garage_bay_1
+```
+
+Notice the **cooldown timer** in the condition block. The arrival notification only fires if the timer is idle. After it fires once, the timer starts and suppresses duplicates for 5 minutes. Without this, you get spammed every time your phone briefly loses GPS lock and bounces between home/not_home.
+
+## Automation 4: Actionable Push with Keep Open
+
+This is the notification that fires when a door has been open for a while but you might want it that way. Instead of auto-closing, it asks what you want to do.
+
+```yaml
+automation:
+  - alias: garage_open_check_with_keep_open
+    id: garage_open_check_with_keep_open
+    description: "Notify after 5 minutes open with option to keep open"
+    mode: parallel
+    max: 2
+    trigger:
+      - platform: state
+        entity_id:
+          - cover.garage_bay_1
+          - cover.garage_bay_2
+        to: "open"
+        for:
+          minutes: 5
+    condition:
+      - condition: state
+        entity_id: timer.garage_notification_cooldown
+        state: "idle"
+    action:
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "Garage Open"
+          message: "{{ trigger.to_state.name }} has been open for 5 minutes."
+          data:
+            actions:
+              - action: "CLOSE_GARAGE_{{ trigger.entity_id.split('.')[1] | upper }}"
+                title: "Close"
+                destructive: true
+              - action: KEEP_GARAGE_OPEN
+                title: "Keep Open"
+            push:
+              interruption-level: time-sensitive
+      - service: timer.start
+        target:
+          entity_id: timer.garage_notification_cooldown
+```
+
+The "Keep Open" action handler disables auto-close temporarily:
+
+```yaml
+automation:
+  - alias: garage_handle_keep_open
+    id: garage_handle_keep_open
+    description: "Disable auto-close when Keep Open is selected"
+    mode: single
+    trigger:
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: KEEP_GARAGE_OPEN
+    action:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.garage_auto_close_enabled
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "Garage"
+          message: "Auto-close disabled. Remember to re-enable it."
+```
+
+This is why the kill switch exists. Tapping "Keep Open" flips `garage_auto_close_enabled` to off, which prevents the auto-close automation from firing. You re-enable it manually when you are done, or build a separate automation to re-enable it at a specific time (midnight, for example).
+
+```yaml
+automation:
+  - alias: garage_re_enable_auto_close_midnight
+    id: garage_re_enable_auto_close_midnight
+    description: "Safety net: re-enable auto-close at midnight"
+    trigger:
+      - platform: time
+        at: "00:00:00"
+    action:
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.garage_auto_close_enabled
+```
+
+## The Cooldown Timer Pattern
+
+The cooldown timer deserves explanation because it applies to many automations, not just garage doors.
+
+The problem: a garage door opens, the 5-minute notification fires, you tap "Close," the door closes, someone opens it again 2 minutes later, and now you get another notification before the cooldown expires. Or your phone bounces GPS zones and the arrival notification fires three times.
+
+The fix: `timer.garage_notification_cooldown` starts when a notification fires. While it is active (not idle), the condition block in the automation evaluates false and the automation does not run. When the timer finishes, the automation is armed again.
+
+This pattern is simple and predictable. You can see the timer state on your dashboard, adjust the duration in the helpers configuration, and it works across automations that share the same timer.
+
+## The Kill Switch Pattern
+
+`input_boolean.garage_auto_close_enabled` is a pattern you should use for any automation that takes physical action in the real world.
+
+Loading groceries? Turn it off. Working in the garage? Turn it off. Having a party with the bay open? Turn it off.
+
+Expose it on your dashboard as a toggle. Add it to HomeKit if you use Siri. The point is fast, frictionless access to disable the automation without editing YAML or digging through the automation UI.
+
+The midnight re-enable automation is your safety net. If you forget to turn it back on, it resets at midnight. You are never more than 24 hours away from protection.
+
+## Putting It All Together
+
+Here is the recommended combination:
+
+1. **5-minute open check** — actionable notification with Close and Keep Open
+2. **10-minute auto-close** — closes the door with a 30-second warning (only if kill switch is on)
+3. **Departure alert** — catches the "left home with door open" case
+4. **Arrival notification** — convenience for opening the door on approach
+5. **Midnight safety net** — re-enables auto-close if it was disabled
+
+These five automations plus two helpers cover every scenario I have encountered in daily use. The 5-minute check fires first as a soft warning. If you ignore it, the 10-minute auto-close handles it. If you leave, the departure alert catches it. The kill switch and cooldown timer prevent false actions and notification floods.
+
+## Troubleshooting
+
+**Door state is wrong or delayed.** Check the sensor. Reed switches need proper alignment — the magnet should be within 10-15mm of the sensor when closed. ratgdo uses the opener's built-in state which is more reliable. If the state lags by more than a few seconds, your automations will misfire.
+
+**Notifications not arriving.** Confirm `notify.mobile_app_*` is the correct entity for your phone. Check Developer Tools > Services and test the notify service manually. On iOS, make sure Home Assistant notifications are allowed and not in a Focus Mode filter.
+
+**Auto-close fires when you are in the garage.** This is the most common complaint. The auto-close has no way to know you are physically present. Solutions: presence sensor in the garage (mmWave works well), or rely on the phone notification + kill switch pattern described above.
+
+**Cooldown timer never resets.** Confirm the timer entity exists and the duration is set. Check Developer Tools > States for `timer.garage_notification_cooldown` — it should show `idle` when not active and `active` with a remaining time when counting down.
+
+## Go Further
+
+This guide covers the core patterns. If you want the full set — multi-door coordination, per-door cooldowns, seasonal timing adjustments, and the YAML packages ready to drop into your config — the Automation Cookbook has it.
+
+[Get the Automation Cookbook](https://beslain.gumroad.com/l/ha-automation-cookbook) — $19, use code **LAUNCH50** for 50% off at launch.
+
+---
+
+*This post is part of [The Automated Home](/) — practical Home Assistant guides from a 700+ entity production system.*

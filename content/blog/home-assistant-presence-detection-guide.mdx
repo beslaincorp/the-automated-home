@@ -1,0 +1,515 @@
+---
+title: "Home Assistant Presence Detection: Complete Guide to Home/Away Automation"
+description: "Build reliable presence detection in Home Assistant using device trackers, person entities, zones, and the companion app. Complete YAML for arrival, departure, guest mode, and kill switch patterns."
+date: "2026-04-05"
+slug: "home-assistant-presence-detection-guide"
+keywords:
+  - home assistant presence detection
+  - home assistant person entity
+  - home assistant home away automation
+  - home assistant arrival automation
+  - home assistant departure automation
+  - home assistant guest mode
+---
+
+# Home Assistant Presence Detection: Complete Guide to Home/Away Automation
+
+Presence detection is the foundation of every serious Home Assistant deployment. Lights that turn on when you get home, doors that lock when you leave, alarms that arm automatically — all of it depends on knowing who is home and who is not. Get this wrong and your automations are either annoying or dangerous.
+
+This guide covers how to build production-reliable presence detection using multiple device trackers, the person entity, zones, and the companion app. Every YAML example here is pulled from a live system running 700+ entities with a wired ELK M1 alarm, UPB lighting, and iPhone-based tracking.
+
+## How Presence Detection Works in Home Assistant
+
+Home Assistant tracks presence through a layered system:
+
+1. **Device trackers** — the raw data sources (companion app GPS, router integration, Bluetooth)
+2. **Person entities** — combine multiple device trackers into a single "is this person home?" answer
+3. **Zones** — geographic areas that give device tracker locations a name (home, work, gym)
+
+The key insight: never build automations directly on device trackers. They go stale, disconnect, and report false states. The person entity exists specifically to merge multiple trackers and give you a reliable composite state.
+
+## Setting Up Device Trackers
+
+### iPhone/Android Companion App
+
+The companion app is the most reliable single tracker for most people. It uses significant location changes, iBeacons, and background GPS to report location without destroying battery life.
+
+Install the companion app, sign in to your HA instance, and it creates a `device_tracker.your_phone` entity automatically. On iOS, make sure you grant "Always" location permission — "While Using" will not fire background updates.
+
+The companion app also sends location updates on zone enter/exit events, which is why defining your zones with accurate GPS coordinates matters.
+
+### Router-Based Tracking
+
+Router integrations (UniFi, Netgear, OpenWrt, etc.) detect when a device is on the local network. This is binary — home or not home — and it is fast. The moment your phone connects to WiFi, HA knows you are home.
+
+The downside: routers cannot tell you which zone you are in (just "on network" or "off network"), and some routers have a delay before marking a device as away. UniFi is the best here — its device tracker updates within seconds.
+
+Add it as a second device tracker alongside the companion app.
+
+### Bluetooth Tracking
+
+If you run ESPHome Bluetooth proxies or the Bluetooth integration, you can detect presence at the room level. A phone seen by the living room proxy is in the living room. This is useful for room-specific automations but overkill for basic home/away.
+
+For home/away, the companion app plus router is the reliable combo. Bluetooth is a bonus layer.
+
+## Configuring the Person Entity
+
+Go to **Settings > People** and assign your device trackers to your person. HA creates a `person.your_name` entity that reports `home`, `not_home`, or the name of a custom zone.
+
+The person entity uses this logic:
+
+- If **any** assigned tracker reports `home`, the person is `home`
+- If **all** trackers report `not_home`, the person is `not_home`
+- GPS-based trackers take priority for zone names
+
+This "any tracker says home = home" logic is exactly what you want. It means a false "away" from one tracker does not trigger your departure automations as long as another tracker still sees you on the network.
+
+**Assign at least two device trackers to every person.** Companion app + router is the minimum. This is the single biggest reliability improvement you can make.
+
+```yaml
+# Example person config (usually done in the UI, but here for reference)
+person:
+  - name: Baily
+    id: baily
+    device_trackers:
+      - device_tracker.b_iphone
+      - device_tracker.b_iphone_unifi
+```
+
+## Defining Zones
+
+Zones give GPS coordinates a name. The `home` zone is created automatically, but you should verify its coordinates and radius are accurate.
+
+```yaml
+zone:
+  - name: Home
+    latitude: 33.12345
+    longitude: -117.12345
+    radius: 100
+    icon: mdi:home
+
+  - name: Work
+    latitude: 33.67890
+    longitude: -117.67890
+    radius: 200
+    icon: mdi:office-building
+
+  - name: Gym
+    latitude: 33.11111
+    longitude: -117.11111
+    radius: 75
+    icon: mdi:weight-lifter
+```
+
+Set the home zone radius large enough to trigger reliably when you pull into the driveway, but not so large that a neighbor walking by triggers it. 75-150 meters works for most houses. If you live in an apartment, keep it tight — 40-75 meters.
+
+## The Kill Switch Pattern
+
+Before building any presence-triggered automation that controls security devices (locks, alarms, garage doors), add a kill switch. This is an `input_boolean` that lets you disable presence automations instantly without editing YAML.
+
+```yaml
+# In your helpers config or via UI
+input_boolean:
+  presence_automations_enabled:
+    name: Presence Automations Enabled
+    icon: mdi:shield-home
+```
+
+Every security-related automation checks this boolean as a condition:
+
+```yaml
+condition:
+  - condition: state
+    entity_id: input_boolean.presence_automations_enabled
+    state: "on"
+```
+
+Why this matters: if your presence detection has a bad day — GPS drift, router reboot, companion app crash — you can flip one switch and stop your house from locking/unlocking/arming randomly. I keep this exposed in the dashboard and in HomeKit for quick access.
+
+## Welcome Home Automation
+
+This fires when the first person arrives home. It disarms the alarm, unlocks the front door, turns on entryway lights, and sends an announcement through distributed speakers.
+
+```yaml
+automation:
+  - alias: welcome_home_arrival
+    description: "First person arrives — disarm, unlock, lights, announce"
+    trigger:
+      - platform: state
+        entity_id: person.baily
+        to: "home"
+    condition:
+      - condition: state
+        entity_id: input_boolean.presence_automations_enabled
+        state: "on"
+      # Only fire if nobody else was already home
+      - condition: template
+        value_template: >
+          {{ states.person
+             | selectattr('state', 'eq', 'home')
+             | list | count == 1 }}
+    action:
+      - parallel:
+          - service: alarm_control_panel.alarm_disarm
+            target:
+              entity_id: alarm_control_panel.home_alarm
+            data:
+              code: !secret alarm_code
+          - service: lock.unlock
+            target:
+              entity_id: lock.front_door
+          - service: light.turn_on
+            target:
+              entity_id:
+                - light.entryway
+                - light.hallway
+            data:
+              brightness: >
+                {% if now().hour >= 18 or now().hour < 7 %}128
+                {% else %}255{% endif %}
+          - service: tts.speak
+            target:
+              entity_id: tts.piper
+            data:
+              media_player_entity_id: media_player.living_room_speaker
+              message: "Welcome home."
+```
+
+Key details:
+
+- The `template` condition counts how many person entities are currently `home`. If the count is 1, that means the person who just arrived is the only one — so this is the first arrival and the house was empty.
+- `parallel` runs all actions simultaneously. You do not want to wait for the alarm to disarm before unlocking the door.
+- Brightness adjusts for time of day. Nobody needs full brightness at midnight.
+
+## Goodbye Routine — Last Person Leaves
+
+The inverse pattern: when the last person leaves, lock everything down.
+
+```yaml
+automation:
+  - alias: goodbye_last_person_leaves
+    description: "Last person leaves — arm alarm, lock doors, kill lights"
+    trigger:
+      - platform: state
+        entity_id: person.baily
+        from: "home"
+        to: "not_home"
+    condition:
+      - condition: state
+        entity_id: input_boolean.presence_automations_enabled
+        state: "on"
+      # Only fire if nobody is still home
+      - condition: template
+        value_template: >
+          {{ states.person
+             | selectattr('state', 'eq', 'home')
+             | list | count == 0 }}
+      # Do not fire if guest mode is on
+      - condition: state
+        entity_id: input_boolean.guest_mode
+        state: "off"
+    action:
+      # Small delay to avoid false triggers from GPS bounce
+      - delay: "00:02:00"
+      # Re-check after delay — did someone come back?
+      - condition: template
+        value_template: >
+          {{ states.person
+             | selectattr('state', 'eq', 'home')
+             | list | count == 0 }}
+      - parallel:
+          - service: alarm_control_panel.alarm_arm_away
+            target:
+              entity_id: alarm_control_panel.home_alarm
+            data:
+              code: !secret alarm_code
+          - service: lock.lock
+            target:
+              entity_id:
+                - lock.front_door
+                - lock.back_door
+          - service: light.turn_off
+            target:
+              entity_id: all
+          - service: climate.set_hvac_mode
+            target:
+              entity_id: climate.thermostat_main
+            data:
+              hvac_mode: "auto"
+          - service: notify.mobile_app_b_iphone
+            data:
+              title: "House Secured"
+              message: "Alarm armed, doors locked, lights off."
+```
+
+The 2-minute delay is critical. GPS bouncing can briefly report `not_home` when you are still in your driveway. The re-check after the delay confirms you actually left. Without this, your alarm will arm while you are loading groceries.
+
+## Guest Mode Toggle
+
+When you have guests, you do not want the house arming itself because your person entity left. Guest mode disables departure automations while keeping arrival automations active.
+
+```yaml
+input_boolean:
+  guest_mode:
+    name: Guest Mode
+    icon: mdi:account-group
+```
+
+The goodbye routine already checks for this (see the condition above). You can also build a guest mode activation automation:
+
+```yaml
+automation:
+  - alias: guest_mode_auto_enable
+    description: "Enable guest mode when a known guest device appears"
+    trigger:
+      - platform: state
+        entity_id: device_tracker.guest_phone
+        to: "home"
+    action:
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.guest_mode
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "Guest Mode"
+          message: "Guest detected. Departure automations paused."
+
+  - alias: guest_mode_auto_disable
+    description: "Disable guest mode when guest device leaves"
+    trigger:
+      - platform: state
+        entity_id: device_tracker.guest_phone
+        to: "not_home"
+        for: "00:30:00"
+    action:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.guest_mode
+```
+
+You can also use the [nmap tracker](https://www.home-assistant.io/integrations/nmap_tracker/) to detect guest phones by MAC address without needing any app installed on their phone.
+
+## "Still Home" Morning Reminder
+
+This automation checks if you are still home past your usual departure time and sends a nudge. Useful for work-from-home days when you forget to adjust the thermostat or for catching days when presence detection is stuck.
+
+```yaml
+automation:
+  - alias: still_home_morning_check
+    description: "Reminder if still home past normal departure time"
+    trigger:
+      - platform: time
+        at: "08:30:00"
+    condition:
+      - condition: state
+        entity_id: person.baily
+        state: "home"
+      - condition: time
+        weekday:
+          - mon
+          - tue
+          - wed
+          - thu
+          - fri
+    action:
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "Still Home"
+          message: >
+            You are still at home at {{ now().strftime('%H:%M') }}.
+            Thermostat is {{ states('climate.thermostat_main') }}.
+          data:
+            actions:
+              - action: "SET_AWAY_MODE"
+                title: "Set Away Mode"
+              - action: "DISMISS"
+                title: "Working from Home"
+```
+
+This pairs well with an actionable notification. Tapping "Set Away Mode" can trigger a separate automation that runs your departure routine manually.
+
+## First Person Arrives vs. Last Person Leaves — The Pattern
+
+The counting pattern used above is the standard approach for multi-person households:
+
+```yaml
+# First person arrives (house was empty)
+condition:
+  - condition: template
+    value_template: >
+      {{ states.person
+         | selectattr('state', 'eq', 'home')
+         | list | count == 1 }}
+
+# Last person leaves (house is now empty)
+condition:
+  - condition: template
+    value_template: >
+      {{ states.person
+         | selectattr('state', 'eq', 'home')
+         | list | count == 0 }}
+```
+
+The first arrival check works because the trigger already fired (meaning someone just arrived), so a count of 1 means they are the only one — the first. The last departure check works because the trigger already fired (someone just left), so a count of 0 means nobody remains.
+
+If you only have one person entity, you can skip the count and just trigger on `to: "home"` and `from: "home"`. The count pattern is for households with 2+ tracked people.
+
+## Combining Trackers for Reliability
+
+Here is what a mature presence setup looks like in practice:
+
+| Tracker | Strengths | Weaknesses |
+|---------|-----------|------------|
+| Companion App GPS | Zone-aware, works anywhere | Battery-dependent, GPS drift |
+| Router (UniFi/etc.) | Fast, no battery impact | Binary only, reconnection delay |
+| Bluetooth Proxy | Room-level accuracy | Short range, requires proxies |
+| Ping/nmap | No app required | Slow to detect departure |
+
+The companion app + router combo handles 99% of cases. The companion app gives you zone awareness (home vs. work vs. gym), while the router gives you fast, reliable home/not_home detection that does not depend on GPS.
+
+If you still get false departures, add a `for` duration to your triggers:
+
+```yaml
+trigger:
+  - platform: state
+    entity_id: person.baily
+    from: "home"
+    to: "not_home"
+    for: "00:05:00"
+```
+
+This requires the person to be away for 5 continuous minutes before firing. Combined with the 2-minute delay in the goodbye automation, you have 7 minutes of buffer against GPS flapping.
+
+## Debugging Presence Issues
+
+When presence detection misbehaves, check these in order:
+
+1. **Developer Tools > States** — search for your person entity and all assigned device trackers. Are they reporting what you expect right now?
+2. **Logbook** — filter by your person entity. Look for rapid home/not_home toggling, which indicates GPS bounce.
+3. **Companion App > Settings > Location** — verify "Always" permission and check that the home zone matches your HA zone exactly.
+4. **Zone radius** — if you are getting false arrivals, your zone is too large. If you are getting missed arrivals, it is too small.
+
+The most common problem is the companion app having "While Using" location permission instead of "Always." Second most common is a home zone radius that is too small.
+
+## Putting It All Together
+
+A complete presence system in a single package file:
+
+```yaml
+# packages/presence.yaml
+
+input_boolean:
+  presence_automations_enabled:
+    name: Presence Automations Enabled
+    icon: mdi:shield-home
+
+  guest_mode:
+    name: Guest Mode
+    icon: mdi:account-group
+
+automation:
+  - alias: welcome_home_arrival
+    trigger:
+      - platform: state
+        entity_id: person.baily
+        to: "home"
+    condition:
+      - condition: state
+        entity_id: input_boolean.presence_automations_enabled
+        state: "on"
+      - condition: template
+        value_template: >
+          {{ states.person
+             | selectattr('state', 'eq', 'home')
+             | list | count == 1 }}
+    action:
+      - parallel:
+          - service: alarm_control_panel.alarm_disarm
+            target:
+              entity_id: alarm_control_panel.home_alarm
+            data:
+              code: !secret alarm_code
+          - service: lock.unlock
+            target:
+              entity_id: lock.front_door
+          - service: light.turn_on
+            target:
+              entity_id: light.entryway
+          - service: tts.speak
+            target:
+              entity_id: tts.piper
+            data:
+              media_player_entity_id: media_player.living_room_speaker
+              message: "Welcome home."
+
+  - alias: goodbye_last_person_leaves
+    trigger:
+      - platform: state
+        entity_id: person.baily
+        from: "home"
+        to: "not_home"
+    condition:
+      - condition: state
+        entity_id: input_boolean.presence_automations_enabled
+        state: "on"
+      - condition: template
+        value_template: >
+          {{ states.person
+             | selectattr('state', 'eq', 'home')
+             | list | count == 0 }}
+      - condition: state
+        entity_id: input_boolean.guest_mode
+        state: "off"
+    action:
+      - delay: "00:02:00"
+      - condition: template
+        value_template: >
+          {{ states.person
+             | selectattr('state', 'eq', 'home')
+             | list | count == 0 }}
+      - parallel:
+          - service: alarm_control_panel.alarm_arm_away
+            target:
+              entity_id: alarm_control_panel.home_alarm
+            data:
+              code: !secret alarm_code
+          - service: lock.lock
+            target:
+              entity_id: lock.front_door
+          - service: light.turn_off
+            target:
+              entity_id: all
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "House Secured"
+          message: "Alarm armed, doors locked, lights off."
+
+  - alias: still_home_morning_check
+    trigger:
+      - platform: time
+        at: "08:30:00"
+    condition:
+      - condition: state
+        entity_id: person.baily
+        state: "home"
+      - condition: time
+        weekday: [mon, tue, wed, thu, fri]
+    action:
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "Still Home"
+          message: >
+            Still home at {{ now().strftime('%H:%M') }}.
+```
+
+Drop that file into your `packages/` directory, restart HA, and you have a working presence system. Customize the entity IDs, add your household members to the person count templates, and adjust the delays to match your GPS reliability.
+
+## What to Build Next
+
+Once basic presence works, the next level is context-aware presence: automations that behave differently based on time of day, which door you entered through, or how long you have been gone. Combining presence with other sensor data (door contacts, motion sensors, light levels) is where things get genuinely useful.
+
+If you want a library of production-tested automations that build on these presence patterns — including context-aware lighting, multi-zone security response, and smart notification routing — the [Automation Cookbook](https://beslain.gumroad.com/l/ha-automation-cookbook) has the complete collection. Use code **LAUNCH50** for 50% off.
+
+---
+
+*This post is part of [The Automated Home](/) — practical Home Assistant guides from a 700+ entity production system.*

@@ -1,0 +1,377 @@
+---
+title: "Home Assistant Actionable Notifications: Complete Guide to Push Notification Buttons on iOS & Android"
+description: "Build actionable push notifications in Home Assistant with tap-to-act buttons, camera snapshots, critical alerts, and notification grouping. Complete YAML examples from a production system."
+date: "2026-04-06"
+slug: "home-assistant-actionable-notifications-guide"
+keywords:
+  - home assistant actionable notifications
+  - home assistant push notification actions
+  - home assistant ios notification buttons
+  - home assistant mobile notification
+---
+
+# Home Assistant Actionable Notifications: Complete Guide for iOS & Android
+
+Standard Home Assistant notifications are one-way. You get a message, you read it, you open the app to do something about it. Actionable notifications fix that. They put buttons directly on the notification so you can respond without opening anything.
+
+Garage has been open for 10 minutes? Tap "Close" right from the lock screen. Alarm triggered? Tap "Disarm" without fumbling through the app. Camera caught motion? See the snapshot and tap "View Live" to pull up the feed.
+
+This is how I handle notifications across a 700+ entity system. Every example here runs in production.
+
+## How Actionable Notifications Work
+
+The flow has two parts:
+
+1. **Send** a notification with an `actions` array. Each action gets a button on the notification.
+2. **Listen** for the `mobile_app_notification_action` event. When the user taps a button, HA fires this event with the action identifier.
+
+The send and the response handler are separate automations. This trips people up — the button on the notification does nothing by itself. You need a second automation that listens for the tap and executes the response.
+
+## Basic Push Notification
+
+Before adding buttons, make sure basic notifications work. Every phone running the HA Companion App registers a `notify.mobile_app_*` service.
+
+```yaml
+automation:
+  - alias: "Simple notification test"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.front_door
+        to: "on"
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "Front Door"
+          message: "Front door opened at {{ now().strftime('%I:%M %p') }}"
+```
+
+Replace `notify.mobile_app_phone` with your device's notify service. Find it in Developer Tools > Services — search for "notify" and look for the one matching your phone.
+
+## Actionable Buttons: The Actions Array
+
+Add buttons by including an `actions` array in the notification's `data` block. Each action needs:
+
+- `action`: A unique identifier (uppercase, used in the event listener)
+- `title`: The text displayed on the button
+
+### Example: Garage Auto-Close with "Keep Open" Button
+
+This is the most useful actionable notification I run. When the garage has been open for 8 minutes, it sends a warning with a "Keep Open" button. If you don't tap it within 2 minutes, a second automation closes the garage.
+
+**The notification automation:**
+
+```yaml
+automation:
+  - alias: "Garage open warning with keep-open button"
+    trigger:
+      - platform: state
+        entity_id: cover.garage_bay_1
+        to: "open"
+        for: "00:08:00"
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "Garage Open"
+          message: "Bay 1 has been open 8 minutes. Closing in 2 minutes."
+          data:
+            tag: "garage-autoclose"
+            actions:
+              - action: GARAGE_KEEP_OPEN
+                title: "Keep Open"
+              - action: GARAGE_CLOSE_NOW
+                title: "Close Now"
+
+      # Wait 2 minutes, then close unless cancelled
+      - delay: "00:02:00"
+      - condition: state
+        entity_id: input_boolean.garage_keep_open
+        state: "off"
+      - service: cover.close_cover
+        target:
+          entity_id: cover.garage_bay_1
+      - service: notify.mobile_app_phone
+        data:
+          title: "Garage Closed"
+          message: "Bay 1 auto-closed after 10 minutes."
+          data:
+            tag: "garage-autoclose"
+```
+
+**The event listener automation (handles the button tap):**
+
+```yaml
+automation:
+  - alias: "Handle garage notification actions"
+    trigger:
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: GARAGE_KEEP_OPEN
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: GARAGE_CLOSE_NOW
+    action:
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.event.data.action == 'GARAGE_KEEP_OPEN' }}"
+            sequence:
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.garage_keep_open
+              - service: notify.mobile_app_phone
+                data:
+                  message: "Garage will stay open."
+                  data:
+                    tag: "garage-autoclose"
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.event.data.action == 'GARAGE_CLOSE_NOW' }}"
+            sequence:
+              - service: cover.close_cover
+                target:
+                  entity_id: cover.garage_bay_1
+
+input_boolean:
+  garage_keep_open:
+    name: Garage Keep Open Override
+```
+
+Key details:
+- The `tag` field is critical. Sending a new notification with the same tag **replaces** the old one instead of stacking duplicates. The "Garage Closed" message replaces the "Closing in 2 minutes" message.
+- The `input_boolean.garage_keep_open` acts as a cancellation flag. When the delay finishes, the automation checks this boolean before closing.
+- Action identifiers must be unique across your entire system. Use prefixed names like `GARAGE_KEEP_OPEN`, not just `KEEP_OPEN`.
+
+## Camera Snapshot in Notifications
+
+Attach a camera image to any notification. The Companion App downloads the image from your HA instance and displays it inline.
+
+### Example: Camera Motion with Snapshot
+
+```yaml
+automation:
+  - alias: "Driveway camera motion notification"
+    trigger:
+      - platform: state
+        entity_id: input_boolean.front_camera_motion
+        to: "on"
+    condition:
+      - condition: state
+        entity_id: input_boolean.front_camera_cooldown
+        state: "off"
+    action:
+      # Start cooldown
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.front_camera_cooldown
+      - service: timer.start
+        target:
+          entity_id: timer.front_camera_cooldown_timer
+
+      # Delay for subject to be fully in frame
+      - delay: "00:00:02"
+
+      # Grab snapshot from camera
+      - service: shell_command.snapshot_front
+
+      # Wait for file write
+      - delay: "00:00:01"
+
+      # Send notification with snapshot and actions
+      - service: notify.mobile_app_phone
+        data:
+          title: "Motion: Front Driveway"
+          message: "{{ now().strftime('%I:%M %p') }}"
+          data:
+            image: /local/snapshots/front_latest.jpg
+            tag: "motion-front"
+            group: "camera-motion"
+            actions:
+              - action: URI
+                title: "View Camera"
+                uri: /lovelace/cameras
+              - action: DISMISS_FRONT_MOTION
+                title: "Dismiss"
+
+      # Reset motion boolean
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.front_camera_motion
+```
+
+The `image` field points to `/local/snapshots/front_latest.jpg`, which maps to `/config/www/snapshots/front_latest.jpg` on disk. The Companion App fetches this via your HA internal URL.
+
+The `URI` action type is special — it opens a URL instead of firing an event. Use it for "View Camera" or "Open Dashboard" buttons. On iOS, `uri` supports HA dashboard paths and external URLs. On Android, use `uri` the same way.
+
+For the snapshot itself, grab it directly from the camera's CGI endpoint (not from the RTSP stream). See my [camera notifications guide](/blog/home-assistant-camera-notifications) for the full setup.
+
+## Critical Alerts (Override Do Not Disturb)
+
+iOS supports critical alerts that bypass Do Not Disturb and the silent switch. These should be reserved for genuine security events — alarm triggers, water leaks, smoke detection.
+
+### Example: Alarm Triggered with Disarm Button
+
+```yaml
+automation:
+  - alias: "Alarm triggered critical notification"
+    trigger:
+      - platform: state
+        entity_id: alarm_control_panel.area_1
+        to: "triggered"
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "ALARM TRIGGERED"
+          message: >
+            {{ trigger.to_state.attributes.changed_by | default('Unknown zone') }}
+            at {{ now().strftime('%I:%M %p') }}
+          data:
+            push:
+              sound:
+                name: default
+                critical: 1
+                volume: 1.0
+            tag: "alarm-triggered"
+            actions:
+              - action: ALARM_DISARM
+                title: "Disarm"
+                destructive: true
+              - action: URI
+                title: "View Cameras"
+                uri: /lovelace/cameras
+```
+
+**The disarm handler:**
+
+```yaml
+automation:
+  - alias: "Handle alarm disarm from notification"
+    trigger:
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: ALARM_DISARM
+    action:
+      - service: alarm_control_panel.alarm_disarm
+        target:
+          entity_id: alarm_control_panel.area_1
+        data:
+          code: !secret alarm_code
+      - service: notify.mobile_app_phone
+        data:
+          title: "Alarm Disarmed"
+          message: "Disarmed via notification at {{ now().strftime('%I:%M %p') }}"
+          data:
+            tag: "alarm-triggered"
+```
+
+iOS critical alert details:
+- `critical: 1` makes the notification bypass DND and silent mode
+- `volume: 1.0` controls the alert sound volume (0.0 to 1.0) independent of the phone's volume setting
+- `destructive: true` on the action renders the button in red — a visual warning that this is a significant action
+- The HA Companion App must have critical alert permissions enabled in iOS Settings > Notifications > Home Assistant > Critical Alerts
+
+**Android equivalent:**
+
+Android does not have the exact same critical alert mechanism, but you can achieve similar behavior:
+
+```yaml
+data:
+  ttl: 0
+  priority: high
+  channel: alarm_stream
+  importance: max
+```
+
+Set `priority: high` and `importance: max` to ensure the notification arrives immediately. Create a notification channel (`alarm_stream`) in the Companion App settings with sound and vibration set to override DND.
+
+## Notification Groups
+
+When you have multiple cameras or sensors firing, notifications stack up fast. Grouping collapses them.
+
+```yaml
+data:
+  group: "camera-motion"
+```
+
+All notifications with the same `group` value are collapsed into a stack on iOS. Android uses `channel` similarly, but grouping is handled differently — set `group` on Android as well and the Companion App handles it.
+
+For camera notifications, I group all motion alerts together:
+
+```yaml
+# Front camera notification
+data:
+  group: "camera-motion"
+  tag: "motion-front"
+
+# Backyard camera notification
+data:
+  group: "camera-motion"
+  tag: "motion-backyard"
+```
+
+The `group` collapses them into a stack. The `tag` keeps each camera's notification as a separate, replaceable entry within the group. New motion on the front camera replaces the old front camera notification but does not touch the backyard one.
+
+## Replacing and Updating Notifications
+
+The `tag` field is the key to clean notification management. When you send a notification with a tag that matches an existing notification, it replaces it.
+
+Use cases:
+- **Progress updates:** Garage opening warning → Garage closed confirmation (same tag, second message replaces the first)
+- **Clear stale alerts:** When an alarm is disarmed, send an empty or "all clear" notification with the same tag to replace the triggered alert
+- **Countdown updates:** Update the notification message every minute with remaining time
+
+```yaml
+# Clear a notification by tag
+- service: notify.mobile_app_phone
+  data:
+    message: clear_notification
+    data:
+      tag: "alarm-triggered"
+```
+
+On iOS, sending `clear_notification` as the message with a matching tag removes the notification from the notification center entirely.
+
+## Multi-Device Notifications
+
+For a household with multiple phones, create a notification group in `configuration.yaml`:
+
+```yaml
+notify:
+  - platform: group
+    name: all_phones
+    services:
+      - service: mobile_app_phone_1
+      - service: mobile_app_phone_2
+```
+
+Then use `notify.all_phones` in your automations. The action events still fire per-device, so only the person who taps the button triggers the response. You do not get duplicate actions.
+
+## Putting It All Together
+
+A complete actionable notification setup for a typical home:
+
+1. **Garage auto-close** — warning with Keep Open / Close Now buttons
+2. **Alarm triggered** — critical alert with Disarm button
+3. **Camera motion** — snapshot with View Camera link
+4. **Door left open** — reminder with Dismiss button
+5. **Person arrives home** — informational with Disarm / Ignore buttons
+
+Each one needs two automations: the sender and the action handler. Use packages to keep the sender, handler, and helpers together in one file.
+
+Common mistakes to avoid:
+- **Duplicate action identifiers.** `DISMISS` used in two different automations will trigger both handlers. Always prefix: `GARAGE_DISMISS`, `DOOR_DISMISS`.
+- **Forgetting the event listener.** The button appears but does nothing. You always need the `mobile_app_notification_action` event automation.
+- **Using critical alerts for non-critical events.** Apple will revoke critical alert permissions from apps that abuse them. Reserve `critical: 1` for security and safety events.
+- **No tag on replaceable notifications.** Without a tag, every notification stacks. A garage that bounces between open/closed will flood the notification center.
+
+## Get 25 Production Notification Automations
+
+Every example in this guide is extracted from the **[HA Automation Cookbook](https://beslain.gumroad.com/l/ha-automation-cookbook)** — 25 drop-in automations packaged as individual YAML files with complete action handlers, helpers, and inline documentation. Garage, security, camera, presence, and quality-of-life automations ready to customize and deploy.
+
+Use code **LAUNCH50** for 50% off.
+
+---
+
+*This post is part of [The Automated Home](/) — practical Home Assistant guides from a 700+ entity production system.*
