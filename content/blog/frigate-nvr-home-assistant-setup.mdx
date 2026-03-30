@@ -1,0 +1,448 @@
+---
+title: "Frigate NVR + Home Assistant: Local AI Camera Detection Without the Cloud"
+description: "Set up Frigate NVR with Home Assistant for local AI object detection. RTSP camera configuration, person/car/animal detection, notification automations, and hardware recommendations. No cloud required."
+date: "2026-04-14"
+slug: "frigate-nvr-home-assistant-setup"
+keywords:
+  - frigate home assistant
+  - frigate nvr setup
+  - home assistant camera ai detection
+  - local nvr home assistant
+  - frigate object detection
+---
+
+# Frigate NVR + Home Assistant: Local AI Camera Detection Without the Cloud
+
+Most camera systems send your video to the cloud for processing. Ring, Nest, Arlo — they all decode your footage on someone else's hardware, run their AI models on it, and send you a notification. You pay monthly for the privilege, and you lose access the moment they change their pricing or kill the product.
+
+Frigate is the opposite. It is a local NVR that runs AI object detection on your own hardware, inside your own network, with zero cloud dependency. It tells the difference between a person, a car, a dog, and a tree branch blowing in the wind. And it integrates directly with Home Assistant.
+
+This guide covers the full setup from hardware selection through working automations. My system runs 4 Vivotek FD9389 5MP cameras with onboard VCA for basic motion detection, and I am adding Frigate for centralized AI detection — one place to manage all cameras, all detection, all recordings, with HA as the automation brain.
+
+## What Frigate Actually Does
+
+Frigate is a Docker container that:
+
+1. Pulls RTSP streams from your cameras
+2. Runs real-time AI object detection on those streams (person, car, dog, cat, bird, and more)
+3. Records 24/7 or on events, with configurable retention
+4. Sends detection events to Home Assistant via MQTT
+5. Provides a web UI for reviewing clips and live views
+
+The AI detection is the key differentiator. Traditional motion detection (including camera-side VCA) triggers on pixel changes — shadows, headlights, rain, insects. Frigate's AI models identify actual objects. You get notified when a person is in your driveway, not when a cloud passes over.
+
+Frigate uses the same kind of neural network models that power commercial camera systems, but running locally on a hardware accelerator you own.
+
+## Hardware Requirements
+
+Frigate's performance depends heavily on your detection hardware. There are three tiers.
+
+### Option 1: Google Coral TPU (Recommended)
+
+The Coral TPU is purpose-built for this. It handles object detection inference in ~10ms per frame, offloading the work from your CPU entirely.
+
+- **USB Coral** (~$35-60): Plugs into any USB 3.0 port. Works with Raspberry Pi 5, Intel NUCs, any Linux box.
+- **M.2 Coral** (~$25-35): Fits in an M.2 A+E or B+M slot. Slightly lower latency than USB. Good for NUC-style builds.
+- **Dual Coral**: One for detection, one for sub-labels or a second model. Only needed at 10+ cameras.
+
+A single USB Coral handles 4-8 cameras at 5 FPS detection without breaking a sweat. This is what most people should buy.
+
+### Option 2: GPU (Intel/NVIDIA)
+
+If you already have a GPU in your server, Frigate can use it:
+
+- **Intel iGPU/Arc**: OpenVINO backend. Arc A380 or even an 11th-gen+ iGPU handles Frigate detection well. This is what I am planning with the Arc A380 in my Proxmox build.
+- **NVIDIA**: TensorRT backend. Any GTX 1060+ or Jetson board. Fastest inference but most power draw.
+
+GPU detection is overkill for Frigate alone but makes sense if the GPU is already in the system doing double duty for Plex transcoding or local LLM inference.
+
+### Option 3: CPU Only
+
+Frigate can run detection on CPU using OpenVINO or TensorFlow Lite. Expect ~100-200ms per inference on a modern x86 chip. This works for 1-2 cameras at low FPS but will peg your CPU with more. Not recommended for production.
+
+### Other Hardware
+
+- **RAM**: Frigate itself uses 1-2 GB. Add ~300 MB per camera. 8 GB total system RAM is comfortable for 4 cameras.
+- **Storage**: Recordings at the sub-stream resolution use ~1-3 GB/day per camera. A 500 GB drive gives you 1-2 weeks of retention across 4 cameras. SSD preferred — Frigate writes constantly.
+- **CPU**: ffmpeg decodes the streams. A quad-core Intel/AMD handles 4 cameras. Hardware-accelerated decoding (Intel QSV, NVIDIA NVDEC, VAAPI) reduces CPU load dramatically.
+
+## RTSP Camera Setup
+
+Frigate pulls RTSP streams from your cameras. You need two streams per camera:
+
+- **Main stream** (high resolution): Used for recording. Full resolution, 15-30 FPS.
+- **Sub stream** (low resolution): Used for AI detection. 640x480 or 1280x720, 5 FPS.
+
+Running detection on the full 5MP main stream is wasteful. The AI model resizes the frame to 320x320 internally anyway. Feed it the sub stream and save significant CPU/GPU resources.
+
+### Finding Your RTSP URLs
+
+Every camera brand has a different RTSP URL format. Common examples:
+
+```
+# Vivotek
+rtsp://user:pass@192.168.6.4/live1s1.sdp      # Main stream
+rtsp://user:pass@192.168.6.4/live1s2.sdp      # Sub stream
+
+# Hikvision
+rtsp://user:pass@192.168.1.100:554/Streaming/Channels/101  # Main
+rtsp://user:pass@192.168.1.100:554/Streaming/Channels/102  # Sub
+
+# Reolink
+rtsp://user:pass@192.168.1.100:554/h264Preview_01_main
+rtsp://user:pass@192.168.1.100:554/h264Preview_01_sub
+
+# Amcrest/Dahua
+rtsp://user:pass@192.168.1.100:554/cam/realmonitor?channel=1&subtype=0  # Main
+rtsp://user:pass@192.168.1.100:554/cam/realmonitor?channel=1&subtype=1  # Sub
+```
+
+Test your RTSP URL with VLC or ffplay before putting it in Frigate. If VLC cannot connect, Frigate will not either.
+
+```bash
+ffplay -rtsp_transport tcp rtsp://user:pass@192.168.6.4/live1s2.sdp
+```
+
+## Installing Frigate
+
+Frigate runs as a Docker container. If you are on Home Assistant OS, install it as an add-on. If you are running Docker/Proxmox, use the official image.
+
+### Home Assistant Add-on
+
+1. Go to Settings > Add-ons > Add-on Store
+2. Add the Frigate repository: `https://github.com/blakeblackshear/frigate-hass-addons`
+3. Install "Frigate NVR"
+4. Configure the add-on (it reads from `/config/frigate.yml` or the add-on config)
+5. Start it
+
+### Docker Compose
+
+```yaml
+services:
+  frigate:
+    container_name: frigate
+    image: ghcr.io/blakeblackshear/frigate:stable
+    restart: unless-stopped
+    privileged: true
+    shm_size: "256mb"
+    volumes:
+      - /path/to/frigate/config:/config
+      - /path/to/frigate/storage:/media/frigate
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "5000:5000"   # Web UI
+      - "8554:8554"   # RTSP restream
+      - "8555:8555"   # WebRTC
+    environment:
+      FRIGATE_RTSP_PASSWORD: "your_password"
+    devices:
+      - /dev/bus/usb:/dev/bus/usb  # USB Coral
+```
+
+Increase `shm_size` if you have more than 4 cameras. Frigate uses shared memory for frame processing.
+
+## Frigate Configuration
+
+The `frigate.yml` file is where everything happens. Here is a production-ready config for 4 cameras with a Coral TPU.
+
+```yaml
+mqtt:
+  enabled: true
+  host: 192.168.20.13  # Your MQTT broker (often same as HA)
+  port: 1883
+  user: mqtt_user
+  password: mqtt_password
+
+detectors:
+  coral:
+    type: edgetpu
+    device: usb
+
+ffmpeg:
+  hwaccel_args: preset-vaapi  # Intel QSV/VAAPI. Use preset-nvidia-h264 for NVIDIA.
+
+detect:
+  width: 1280
+  height: 720
+  fps: 5
+
+objects:
+  track:
+    - person
+    - car
+    - dog
+    - cat
+  filters:
+    person:
+      min_area: 5000
+      max_area: 100000
+      min_score: 0.6
+      threshold: 0.7
+    car:
+      min_area: 10000
+      min_score: 0.6
+      threshold: 0.7
+
+record:
+  enabled: true
+  retain:
+    days: 3
+    mode: motion
+  events:
+    retain:
+      default: 14
+      mode: active_objects
+      objects:
+        person: 30
+        car: 7
+
+snapshots:
+  enabled: true
+  retain:
+    default: 14
+    objects:
+      person: 30
+  bounding_box: true
+  crop: true
+
+cameras:
+  front_driveway:
+    ffmpeg:
+      inputs:
+        - path: rtsp://user:pass@192.168.6.2/live1s1.sdp
+          roles:
+            - record
+        - path: rtsp://user:pass@192.168.6.2/live1s2.sdp
+          roles:
+            - detect
+    detect:
+      enabled: true
+
+  side_driveway:
+    ffmpeg:
+      inputs:
+        - path: rtsp://user:pass@192.168.6.5/live1s1.sdp
+          roles:
+            - record
+        - path: rtsp://user:pass@192.168.6.5/live1s2.sdp
+          roles:
+            - detect
+    detect:
+      enabled: true
+
+  backyard_patio:
+    ffmpeg:
+      inputs:
+        - path: rtsp://user:pass@192.168.6.4/live1s1.sdp
+          roles:
+            - record
+        - path: rtsp://user:pass@192.168.6.4/live1s2.sdp
+          roles:
+            - detect
+    detect:
+      enabled: true
+
+  backyard_court:
+    ffmpeg:
+      inputs:
+        - path: rtsp://user:pass@192.168.6.3/live1s1.sdp
+          roles:
+            - record
+        - path: rtsp://user:pass@192.168.6.3/live1s2.sdp
+          roles:
+            - detect
+    detect:
+      enabled: true
+```
+
+### Key Config Decisions
+
+**Detection FPS**: 5 FPS is the sweet spot. Higher FPS burns more Coral cycles without meaningfully improving detection. A person does not appear and disappear in 200ms.
+
+**Object filters**: `min_area` prevents tiny false detections (birds at a distance classified as "person"). `min_score` is the model's confidence threshold — 0.6 means "at least 60% sure this is a person." The `threshold` is the score needed to confirm a tracked object.
+
+**Recording retention**: `motion` mode keeps all clips where any motion occurred (3 days). `active_objects` mode keeps clips where a tracked object was present (14 days for most, 30 days for persons). This balances storage with keeping important footage.
+
+## Zones and Masks
+
+Zones define regions within a camera's view where you care about specific objects. Masks define regions to ignore entirely.
+
+### Zones
+
+Use zones to create targeted automations — "person in the driveway" vs "person on the sidewalk."
+
+```yaml
+cameras:
+  front_driveway:
+    zones:
+      driveway:
+        coordinates: 320,480,640,480,640,720,320,720
+        objects:
+          - person
+          - car
+      porch:
+        coordinates: 0,300,250,300,250,600,0,600
+        objects:
+          - person
+```
+
+Zone coordinates are x,y pairs defining a polygon on the detect stream resolution. Use the Frigate web UI's mask/zone editor to draw them visually instead of guessing coordinates.
+
+### Motion Masks
+
+Mask out areas with constant motion that waste detection cycles:
+
+```yaml
+cameras:
+  front_driveway:
+    motion:
+      mask:
+        - 0,0,200,0,200,100,0,100  # Tree in upper left
+        - 1100,0,1280,0,1280,200,1100,200  # Flag pole
+```
+
+This prevents Frigate from even sending those regions to the AI model. Use them aggressively on trees, bushes, roads with constant traffic, and reflective surfaces.
+
+## Home Assistant Integration
+
+### Install the Frigate Integration
+
+1. Install via HACS: search for "Frigate" in the HACS integrations
+2. Add the integration in Settings > Devices & Services
+3. Point it at your Frigate instance URL (e.g., `http://192.168.20.50:5000`)
+
+This creates:
+
+- **Camera entities**: Live view for each camera (via RTSP restream)
+- **Binary sensors**: `binary_sensor.front_driveway_person_motion` — on when a person is actively detected
+- **Sensors**: Object count, detection FPS
+- **Media sources**: Browse recordings and clips from HA's media browser
+
+### Frigate Card (Lovelace)
+
+The [Frigate Card](https://github.com/dermotduffy/frigate-hass-card) (install via HACS) is vastly better than the stock camera card. It shows live views with bounding boxes, lets you scrub through event timelines, and plays clips inline.
+
+```yaml
+type: custom:frigate-card
+cameras:
+  - camera_entity: camera.front_driveway
+    live_provider: ha
+  - camera_entity: camera.side_driveway
+    live_provider: ha
+  - camera_entity: camera.backyard_patio
+    live_provider: ha
+  - camera_entity: camera.backyard_court
+    live_provider: ha
+menu:
+  style: hover-card
+live:
+  preload: false
+event_viewer:
+  auto_play: true
+```
+
+## Notification Automation: Person Detected with Snapshot
+
+This is the automation most people want — a push notification with a snapshot when a person is detected in a specific zone.
+
+```yaml
+automation:
+  - alias: frigate_person_detected_driveway
+    trigger:
+      - platform: mqtt
+        topic: frigate/events
+        value_template: "{{ value_json['after']['label'] }}"
+        payload: person
+    condition:
+      - condition: template
+        value_template: >
+          {{ trigger.payload_json['after']['camera'] == 'front_driveway' }}
+      - condition: template
+        value_template: >
+          {{ 'driveway' in trigger.payload_json['after']['entered_zones'] }}
+      - condition: template
+        value_template: >
+          {{ trigger.payload_json['type'] == 'new' }}
+    action:
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "Person Detected"
+          message: "Person in the front driveway"
+          data:
+            image: >
+              /api/frigate/notifications/{{ trigger.payload_json['after']['id'] }}/snapshot.jpg
+            tag: frigate-person-driveway
+            group: frigate-security
+            actions:
+              - action: URI
+                title: "View Camera"
+                uri: /lovelace/security
+```
+
+### How This Works
+
+1. Frigate publishes every detection event to MQTT topic `frigate/events`
+2. The automation triggers on any event where the label is "person"
+3. Conditions filter to the specific camera, zone, and event type (`new` = first detection, not updates)
+4. The notification includes Frigate's snapshot with the bounding box drawn on it
+5. The `tag` ensures subsequent detections replace the existing notification rather than stacking
+
+The `type: new` filter is critical. Without it, you get a notification every time the tracked object moves, which can be 20-50 updates per event.
+
+## Performance Tuning
+
+### Reduce CPU Load
+
+- **Use hardware-accelerated decoding.** The `hwaccel_args` presets in Frigate handle this. Intel QSV (`preset-vaapi`) or NVIDIA NVDEC (`preset-nvidia-h264`) cut CPU usage by 50-80%.
+- **Lower detect stream resolution.** 640x480 is fine for detection. The model resizes to 320x320 anyway.
+- **Lower detect FPS.** 5 FPS is plenty. Drop to 3 FPS if your hardware is struggling.
+- **Use motion masks liberally.** Every masked pixel is a pixel that does not get sent to the detector.
+
+### Reduce False Positives
+
+- **Increase `min_score`** from 0.6 to 0.7 if you are getting ghost detections.
+- **Increase `min_area`** to filter out objects that are too small to be real.
+- **Add zones** and only automate on zone entries, not raw detections.
+- **Use required zones** to ensure objects must enter a specific zone before an event is created:
+
+```yaml
+cameras:
+  front_driveway:
+    review:
+      alerts:
+        required_zones:
+          - driveway
+```
+
+### Storage Management
+
+Frigate writes constantly. Use an SSD, not an SD card or spinning disk. Monitor disk usage and adjust retention:
+
+```yaml
+record:
+  retain:
+    days: 1        # Keep all motion recordings for 1 day
+  events:
+    retain:
+      default: 7   # Keep detection events for 7 days
+```
+
+For 4 cameras at sub-stream recording quality, expect 2-5 GB per day total. Main stream recording uses 10-30 GB per day depending on resolution and bitrate.
+
+## Why Not Just Use Camera VCA?
+
+Camera-side VCA (like the Vivotek smart detection I run) is good for basic motion. It runs on the camera's DSP, triggers instantly, and costs nothing extra. But it cannot tell you what it saw. Motion is motion — person, car, cat, shadow, rain.
+
+Frigate adds the "what" layer. The same motion event that your camera flags as "motion detected" gets classified by Frigate as "person" or "car" or ignored entirely as "tree branch." This is the difference between getting 50 notifications a day and getting 3 that actually matter.
+
+The best setup uses both: camera VCA as a fast first pass, Frigate as the intelligent second pass.
+
+## Get the Full Security Automation Stack
+
+The **ELK M1 HA Security Blueprint** includes alarm response automations, camera notification patterns, and the YAML architecture for integrating Frigate events with a wired alarm panel. If you are building a serious security system in Home Assistant, it saves weeks of trial and error.
+
+[Get the ELK M1 Security Blueprint — $49](https://beslain.gumroad.com/l/elk-m1-ha-security-blueprint) — use code **LAUNCH50** for 50% off at launch.
+
+---
+
+*This post is part of [The Automated Home](/) — practical Home Assistant guides from a 700+ entity production system.*

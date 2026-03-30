@@ -1,0 +1,352 @@
+---
+title: "Home Assistant Backup Strategy: Never Lose Your Config Again"
+description: "Complete Home Assistant backup guide — automated snapshots, offsite storage, Git version control for YAML, database management, and tested recovery procedures. From someone running 60+ automations they can't afford to lose."
+date: "2026-04-13"
+slug: "home-assistant-backup-strategy"
+keywords:
+  - home assistant backup
+  - home assistant backup strategy
+  - home assistant git config
+  - home assistant restore
+  - home assistant snapshot automation
+---
+
+# Home Assistant Backup Strategy: Never Lose Your Config Again
+
+I have 60+ automations, 700+ entities, 11 package files, custom integrations, and a security system that calls the police. If my Home Assistant instance dies and I cannot recover it in under an hour, real things stop working — garage doors, alarm responses, camera notifications, voice announcements.
+
+This is the backup strategy running on my production system. It covers automated snapshots, offsite storage, Git version control for YAML, database management, and a tested recovery procedure. Not theory — I have restored from these backups.
+
+## What You Are Protecting
+
+Before building a backup strategy, understand what lives on your Home Assistant instance:
+
+| Component | Location | Critical? |
+|-----------|----------|-----------|
+| YAML config (automations, packages, scripts) | `/config/` | Yes — this is irreplaceable |
+| Custom integrations | `/config/custom_components/` | Yes — patched code, hard to recreate |
+| Dashboards (Lovelace) | `/config/.storage/` | Yes — hours of layout work |
+| Secrets | `/config/secrets.yaml` | Yes — API keys, passwords |
+| Recorder database | `/config/home-assistant_v2.db` | No — history only, rebuilds automatically |
+| Media files | `/config/media/`, `/media/` | Depends — camera snapshots, TTS audio |
+| Add-on data | `/addons/`, `/addon_configs/` | Varies — some add-ons store critical config |
+
+The YAML config and `.storage` directory are the crown jewels. Everything else is either rebuildable or optional.
+
+## Level 1: Built-in Backups
+
+Home Assistant has a built-in backup system that works out of the box. Go to **Settings → System → Backups**.
+
+Click **Create Backup**, give it a name, and it generates a compressed tar archive of your entire config directory, add-on data, and the core database. The file lands in `/backup/` on your system.
+
+This is better than nothing, but it has problems:
+
+- **It is manual.** You will forget.
+- **It stays on the same device.** SD card dies, backups die with it.
+- **It includes the database by default.** A 2 GB database turns a 50 MB backup into a 2 GB backup.
+
+### Automated Backup Schedule
+
+Starting with Home Assistant 2024.11+, you can configure automatic backups directly in the UI under **Settings → System → Backups → Automatic backups**. Set a schedule (daily recommended), retention count, and whether to include the database.
+
+My settings:
+
+- **Schedule:** Daily at 3:00 AM
+- **Keep last:** 7 backups
+- **Include database:** No (more on this below)
+
+For older versions, you can automate backups with a simple automation:
+
+```yaml
+automation:
+  - id: "daily_backup"
+    alias: "Daily HA Backup"
+    trigger:
+      - platform: time
+        at: "03:00:00"
+    action:
+      - service: backup.create
+        data:
+          name: "auto_{{ now().strftime('%Y%m%d_%H%M') }}"
+```
+
+This gives you a rolling window of backups on-device. But on-device is not enough.
+
+## Level 2: Offsite Backup
+
+A backup that lives on the same SD card or SSD as your installation is not a backup. It is a second copy on the same failure point.
+
+You need at least one copy somewhere else.
+
+### Option A: Samba Backup Add-on (Recommended for Local NAS)
+
+Install the **Samba Backup** add-on from the add-on store. It copies your backup files to any SMB/CIFS share — a NAS, a desktop computer, a Raspberry Pi with an external drive.
+
+Configuration:
+
+```yaml
+share: "ha_backups"
+host: "192.168.20.50"
+username: "backup_user"
+password: "your_password"
+keep_local: 3
+keep_remote: 14
+trigger_time: "04:00"
+exclude_database: true
+```
+
+This runs after your daily backup completes, copies it to the NAS, and cleans up old copies on both ends. I keep 3 locally and 14 on the NAS.
+
+### Option B: Google Drive Backup Add-on (Cloud)
+
+The **Google Drive Backup** add-on (by sabeechen) is the most popular offsite backup solution. It uploads backups directly to your Google Drive.
+
+After installing from the add-on store:
+
+1. Authenticate with your Google account
+2. Set the backup schedule (or let it use your existing automatic backups)
+3. Configure retention — I recommend 5 in Drive, 3 local
+
+The advantage is geographic redundancy. If your house burns down, your HA config survives.
+
+### Option C: rsync to Remote Server
+
+If you have SSH access to your HA instance and a remote server, a cron job on the remote machine can pull backups:
+
+```bash
+#!/bin/bash
+# Run from remote server via cron
+rsync -avz --delete \
+  hassio@192.168.20.13:/backup/ \
+  /mnt/backups/homeassistant/ \
+  -e "ssh -i ~/.ssh/ha_key"
+```
+
+This is what I run in addition to the Samba backup. Belt and suspenders.
+
+### The 3-2-1 Rule
+
+You want **3** copies of your data, on **2** different media types, with **1** offsite. For Home Assistant:
+
+1. **On-device** — built-in automatic backups
+2. **Local NAS** — Samba Backup add-on
+3. **Cloud or remote** — Google Drive or rsync to a VPS
+
+If you only do one thing from this guide, set up the Google Drive add-on. It takes 10 minutes and covers the worst-case scenarios.
+
+## Level 3: Git Version Control for YAML
+
+Backups save everything as a blob. Git gives you line-by-line history of every change you have ever made to your configuration. Different problems, different solutions.
+
+When I break an automation and need to know what changed, I do not restore a backup. I check `git log` and `git diff`.
+
+### Setting Up Git in /config
+
+SSH into your Home Assistant instance and initialize a repo:
+
+```bash
+cd /config
+git init
+git add -A
+git commit -m "Initial commit"
+```
+
+### The .gitignore File
+
+This is critical. You do not want to commit your database, secrets, or large binary files:
+
+```gitignore
+# Database — large, rebuilds automatically
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets — never commit credentials
+secrets.yaml
+
+# Ephemeral / runtime
+.cloud/
+.storage/
+tts/
+home-assistant.log
+home-assistant.log.*
+
+# Backups — too large for git
+backups/
+
+# Dependencies — reinstalled automatically
+deps/
+custom_components/*/manifest.json.bak
+
+# Media
+media/
+
+# OS files
+.DS_Store
+__pycache__/
+*.pyc
+```
+
+**Note on secrets.yaml:** Never commit this file. Instead, commit a `secrets_example.yaml` with placeholder values so you know what keys are needed.
+
+**Note on .storage/:** I excluded it here because it contains large JSON files that change frequently (entity registry, device registry, dashboards). Some people include it. If your dashboards took hours to build, consider including `.storage/lovelace*` specifically.
+
+### Commit Strategy
+
+I commit after every meaningful change:
+
+```bash
+cd /config
+git add -A
+git commit -m "Add night light automation for hallway zones"
+```
+
+You can also automate commits with a daily cron job or a shell_command triggered by an automation:
+
+```yaml
+shell_command:
+  git_commit: 'cd /config && git add -A && git diff-index --quiet HEAD || git commit -m "Auto-commit {{ now().strftime(''%Y-%m-%d %H:%M'') }}"'
+
+automation:
+  - id: "daily_git_commit"
+    alias: "Daily Git Commit"
+    trigger:
+      - platform: time
+        at: "02:30:00"
+    action:
+      - service: shell_command.git_commit
+```
+
+The `git diff-index --quiet HEAD ||` part prevents empty commits when nothing changed.
+
+### Push to a Private Remote
+
+For offsite Git backup, push to a private GitHub or Gitea repository:
+
+```bash
+git remote add origin git@github.com:yourusername/ha-config.git
+git push -u origin main
+```
+
+Now you have full version history of every configuration change, accessible from anywhere, with the ability to diff any two points in time.
+
+## Database Management
+
+The recorder database (`home-assistant_v2.db`) is the single biggest factor in backup size and system performance. Left unchecked, it grows to multiple gigabytes.
+
+### Purge Configuration
+
+Add this to your `configuration.yaml`:
+
+```yaml
+recorder:
+  purge_keep_days: 7
+  commit_interval: 5
+  exclude:
+    domains:
+      - automation
+      - updater
+      - camera
+    entity_globs:
+      - sensor.upb_*
+      - sensor.date_*
+    event_types:
+      - call_service
+```
+
+**purge_keep_days: 7** is aggressive but practical. Most people never look at data older than a week. If you need long-term trends, use InfluxDB or the Long-Term Statistics feature (which stores downsampled data separately from the recorder).
+
+### Exclude Noisy Entities
+
+Entities that update frequently and provide no useful history should be excluded. Things like:
+
+- UPB/lighting state reports (dozens per minute)
+- Date/time sensors
+- Camera entities (just storing "idle"/"recording" strings)
+- System monitor sensors you never graph
+
+Every excluded entity reduces database writes, improves performance, and shrinks backups.
+
+### SQLite vs MariaDB
+
+The default SQLite database works fine for most setups. Consider MariaDB (via the add-on) if:
+
+- You have 500+ entities with recorder enabled
+- You want to query history data directly with SQL
+- You are seeing "database locked" errors during heavy write periods
+
+For a Pi 5 running from SSD (not SD card), SQLite handles 700+ entities without issues. The SSD is the bigger factor — never run Home Assistant from an SD card in production.
+
+## Recovery Procedure (Tested)
+
+A backup you have never tested is not a backup. Here is the procedure I have actually run.
+
+### Full Restore from Backup
+
+1. **Flash a new Home Assistant OS image** to your SSD/SD card using Balena Etcher or Raspberry Pi Imager
+2. **Boot and open the onboarding screen** at `http://homeassistant.local:8123`
+3. On the onboarding page, click **"Restore from backup"** instead of creating a new user
+4. Upload your `.tar` backup file (or connect to your Samba/Google Drive location)
+5. Wait. A full restore on a Pi 5 takes 5-15 minutes depending on backup size.
+6. **Reboot when prompted.** The system comes back up with your exact configuration.
+
+### Partial Restore (YAML Only)
+
+If you just need your configuration back (fresh database, fresh install, but your automations and packages):
+
+1. Install Home Assistant OS fresh and complete onboarding
+2. SSH in or use the File Editor add-on
+3. Copy your YAML files from your Git repo into `/config/`
+4. Copy `secrets.yaml` from your secure storage
+5. Install required custom integrations (HACS or manual)
+6. Restart Home Assistant
+
+This takes longer because you are reinstalling integrations manually, but it gives you a clean database and fresh start.
+
+### What to Verify After Restore
+
+After any restore, check:
+
+- [ ] All automations appear and are enabled/disabled as expected
+- [ ] Custom integrations load without errors (check the logs)
+- [ ] Secrets are populated (notifications, API keys)
+- [ ] Add-ons are running (especially critical ones like Samba, SSH)
+- [ ] A test automation fires correctly
+- [ ] Mobile app notifications work (you may need to re-register the app)
+
+## SD Card Failure Protection
+
+If you are running Home Assistant from an SD card: stop. SD cards fail. It is not a question of if, but when.
+
+Move to an SSD. On a Raspberry Pi 5, this means:
+
+1. Get a USB 3.0 to SATA adapter or an NVMe HAT (Pimoroni, Geekworm, Argon ONE)
+2. Flash Home Assistant OS to the SSD
+3. Restore from backup
+4. Remove the SD card
+
+An NVMe SSD on a Pi 5 gives you 5-10x the read/write speed of an SD card, dramatically longer lifespan, and your backups actually have something reliable to restore to.
+
+If you absolutely must use an SD card, use an A2-rated endurance card (Samsung PRO Endurance, SanDisk MAX Endurance) and back up daily to an offsite location. Accept that the card will eventually fail and plan for a 15-minute recovery.
+
+## The Minimum Viable Backup Strategy
+
+If you do nothing else:
+
+1. **Enable automatic backups** — Settings → System → Backups, daily, exclude database
+2. **Install Google Drive Backup add-on** — 10 minutes, gives you offsite copies
+3. **Set up Git in /config** — takes 5 minutes, gives you change history forever
+
+This covers catastrophic failure (full restore from Google Drive), configuration mistakes (git revert), and gradual corruption (rolling backup window).
+
+It takes 30 minutes to set up. Losing your config and rebuilding from scratch takes days.
+
+## Get 25 Production-Ready Automations
+
+Once your backup strategy is solid, build out your automation library with confidence. The **[HA Automation Cookbook](https://beslain.gumroad.com/l/ha-automation-cookbook)** includes 25 production-tested automations as individual YAML package files — presence detection, security response, climate control, notification management, and more. Each one is documented and ready to customize.
+
+Use code **LAUNCH50** for 50% off.
+
+---
+
+*This post is part of [The Automated Home](/) — practical Home Assistant guides from a 700+ entity production system.*
