@@ -1,0 +1,448 @@
+---
+title: "Home Assistant YAML Tips: 15 Tricks I Learned After 60 Automations"
+description: "Practical YAML tips for Home Assistant power users. Anchors, templates, packages, secrets management, validation, and the mistakes that will waste your afternoon. From someone running 60+ automations in production."
+date: "2026-04-08"
+slug: "home-assistant-yaml-tips-tricks"
+keywords:
+  - home assistant yaml tips
+  - home assistant yaml tricks
+  - home assistant yaml best practices
+  - home assistant automation tips
+---
+
+# Home Assistant YAML Tips: 15 Tricks I Learned After 60 Automations
+
+I have 60+ automations across 11 package files controlling a 700+ entity system. Every tip here comes from something that either saved me real time or cost me an afternoon of debugging. No theory — just the things that actually matter when you're writing YAML every week.
+
+## 1. YAML Anchors Eliminate Duplicate Blocks
+
+If you're copy-pasting the same condition or action across multiple automations, you're doing it wrong. YAML anchors let you define a block once and reuse it.
+
+Define an anchor with `&name`, reference it with `*name`, and merge mapping keys with `<<:`.
+
+```yaml
+# Define once at the top of your package
+.common_conditions:
+  home_and_awake: &home_and_awake
+    - condition: state
+      entity_id: person.baily
+      state: "home"
+    - condition: state
+      entity_id: input_boolean.sleep_mode
+      state: "off"
+
+automation:
+  - id: "motion_kitchen_lights"
+    alias: "Kitchen Motion Lights"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.kitchen_motion
+        to: "on"
+    condition: *home_and_awake
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.kitchen
+
+  - id: "motion_hallway_lights"
+    alias: "Hallway Motion Lights"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.hallway_motion
+        to: "on"
+    condition: *home_and_awake
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.hallway
+```
+
+Two automations, one shared condition block. Change it in one place, both update. This is native YAML — no HA-specific feature required.
+
+## 2. Jinja2 Templates Make Automations Dynamic
+
+Templates let you compute values at runtime instead of hardcoding them. The most common use: brightness that changes based on time of day.
+
+```yaml
+action:
+  - service: light.turn_on
+    target:
+      entity_id: light.hallway
+    data:
+      brightness: >
+        {% set hour = now().hour %}
+        {% if hour >= 23 or hour < 5 %}25
+        {% elif hour >= 5 and hour < 7 %}77
+        {% elif hour >= 7 and hour < 21 %}178
+        {% else %}102{% endif %}
+```
+
+The `>` after `brightness:` tells YAML this is a multi-line scalar. HA evaluates it as a Jinja2 template and returns the number. You can also use templates in `message:` fields for notifications, `data:` for service calls, and even `condition:` blocks with `value_template`.
+
+```yaml
+condition:
+  - condition: template
+    value_template: "{{ states('sensor.front_door_battery') | int < 20 }}"
+```
+
+## 3. secrets.yaml Keeps Credentials Out of Your Config
+
+Never hardcode API keys, passwords, or webhook URLs in your automations. Home Assistant reads `secrets.yaml` from your config directory and substitutes values anywhere you use `!secret`.
+
+```yaml
+# /config/secrets.yaml
+pushover_api_key: "abc123def456"
+camera_password: "mysecretpass"
+webhook_camera_front: "a8f3e2b1-unique-id-here"
+
+# In your automation
+action:
+  - service: notify.pushover
+    data:
+      message: "Motion detected"
+      data:
+        api_key: !secret pushover_api_key
+```
+
+This also means you can share your entire config on GitHub without leaking credentials. Just add `secrets.yaml` to `.gitignore`.
+
+## 4. !include and !include_dir_named Split Your Config
+
+As your config grows, one massive file becomes unmanageable. HA supports several include strategies:
+
+```yaml
+# Include a single file
+automation: !include automations.yaml
+
+# Include a directory — each file becomes a named key
+homeassistant:
+  packages: !include_dir_named packages/
+
+# Include a directory — each file is a list item merged together
+automation: !include_dir_merge_list automations/
+
+# Include a directory — each file is a dict merged together
+sensor: !include_dir_merge_named sensors/
+```
+
+I use `!include_dir_named packages/` for all my automations. Each YAML file in `packages/` is a self-contained module with its own automations, helpers, timers, and scripts. See my [packages guide](/blog/home-assistant-packages-yaml-guide) for the full setup.
+
+## 5. Automation IDs: Always Set Them
+
+Every automation needs a unique `id:` field. Without it, HA can't track the automation in the UI — you lose access to the trace debugger, you can't enable/disable it from the dashboard, and the automation editor won't show it.
+
+```yaml
+automation:
+  - id: "garage_auto_close_warning"  # Required for UI tracking
+    alias: "Garage Auto-Close Warning"
+    trigger:
+      # ...
+```
+
+Use descriptive, snake_case IDs. I prefix mine with the package name: `garage_auto_close`, `camera_push_front_motion`, `alarm_triggered_response`. If two automations share an ID, only one loads — and HA won't tell you.
+
+## 6. mode: Controls What Happens on Re-Trigger
+
+By default, automations use `mode: single` — if the automation is already running, a new trigger is ignored. This is often not what you want.
+
+```yaml
+automation:
+  - id: "motion_light_hallway"
+    alias: "Hallway Motion Light"
+    mode: restart  # Kill current run, start fresh
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.hallway_motion
+        to: "on"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.hallway
+      - delay: "00:03:00"
+      - service: light.turn_off
+        target:
+          entity_id: light.hallway
+```
+
+The four modes:
+- **single** — Ignore new triggers while running. Good for alarm response chains.
+- **restart** — Kill current run, start over. Perfect for motion lights with a timer (every new motion resets the countdown).
+- **queued** — Stack triggers, run them one after another. Good for TTS announcements.
+- **parallel** — Run every trigger simultaneously. Use carefully — 10 triggers = 10 parallel runs.
+
+If your motion light stays on forever or your notification fires twice, check your `mode:` first.
+
+## 7. Condition Shortcuts Save Lines
+
+You don't always need the verbose `condition:` block. HA supports shorthand for common checks.
+
+```yaml
+# Verbose
+condition:
+  - condition: state
+    entity_id: input_boolean.notifications_enabled
+    state: "on"
+
+# Shorthand — same result
+condition: "{{ is_state('input_boolean.notifications_enabled', 'on') }}"
+```
+
+For combining conditions:
+
+```yaml
+# AND (default — all must be true)
+condition:
+  - condition: state
+    entity_id: person.baily
+    state: "home"
+  - condition: time
+    after: "22:00:00"
+
+# OR — at least one must be true
+condition:
+  - condition: or
+    conditions:
+      - condition: state
+        entity_id: cover.garage_bay_1
+        state: "open"
+      - condition: state
+        entity_id: cover.garage_bay_2
+        state: "open"
+
+# NOT — must be false
+condition:
+  - condition: not
+    conditions:
+      - condition: state
+        entity_id: alarm_control_panel.panel
+        state: "triggered"
+```
+
+## 8. Trigger Variables Give Context to Actions
+
+When an automation has multiple triggers, you need to know which one fired. Trigger variables solve this.
+
+```yaml
+automation:
+  - id: "door_opened_notification"
+    alias: "Door Opened Notification"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.front_door
+        to: "on"
+        id: front_door
+      - platform: state
+        entity_id: binary_sensor.back_door
+        to: "on"
+        id: back_door
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "Door Opened"
+          message: "{{ trigger.id }} opened at {{ now().strftime('%H:%M') }}"
+```
+
+The `trigger.id` field is a string you assign to each trigger. Inside actions, you also get `trigger.entity_id`, `trigger.to_state`, `trigger.from_state`, and other context depending on the trigger platform. This eliminates the need for separate automations per door.
+
+## 9. choose: Branches Your Logic
+
+Instead of writing three separate automations for different scenarios, use `choose:` to branch within one.
+
+```yaml
+action:
+  - choose:
+      - conditions:
+          - condition: time
+            after: "06:00:00"
+            before: "09:00:00"
+        sequence:
+          - service: tts.speak
+            target:
+              entity_id: media_player.kitchen
+            data:
+              message: "Good morning. Garage is {{ states('cover.garage_bay_1') }}."
+      - conditions:
+          - condition: time
+            after: "22:00:00"
+        sequence:
+          - service: light.turn_on
+            target:
+              entity_id: light.hallway
+            data:
+              brightness: 25
+    default:
+      - service: light.turn_on
+        target:
+          entity_id: light.hallway
+        data:
+          brightness: 178
+```
+
+`choose:` evaluates conditions top-down and runs the first match. The `default:` block runs if nothing matches. This is Home Assistant's version of if/elif/else.
+
+## 10. wait_for_trigger Pauses Until Something Happens
+
+Sometimes you need an automation to wait for a real-world event before continuing. `wait_for_trigger` pauses execution until a condition is met or a timeout expires.
+
+```yaml
+action:
+  - service: notify.mobile_app_phone
+    data:
+      title: "Garage Open"
+      message: "Bay 1 has been open 10 minutes. Closing in 2 minutes."
+      data:
+        actions:
+          - action: KEEP_OPEN
+            title: "Keep Open"
+  - wait_for_trigger:
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: KEEP_OPEN
+    timeout: "00:02:00"
+    continue_on_timeout: true
+  - if:
+      - "{{ wait.trigger is none }}"
+    then:
+      - service: cover.close_cover
+        target:
+          entity_id: cover.garage_bay_1
+```
+
+This sends a notification, waits 2 minutes for the user to tap "Keep Open," and closes the garage if they don't respond. `wait.trigger` is `none` when the timeout fires without a trigger.
+
+## 11. Use person, Not device_tracker
+
+`device_tracker` entities represent individual tracking methods — your phone's WiFi, Bluetooth, GPS, etc. A single person might have 2-3 device trackers, and they can disagree about whether you're home.
+
+`person` entities combine all device trackers for one individual and apply HA's presence logic. Always use `person` for presence-based automations.
+
+```yaml
+# Wrong — depends on one tracking method
+trigger:
+  - platform: state
+    entity_id: device_tracker.phone_wifi
+    to: "home"
+
+# Right — combines all tracking sources
+trigger:
+  - platform: state
+    entity_id: person.baily
+    to: "home"
+```
+
+If your presence automations are unreliable, check Developer Tools > States and look at your `person` entity's source list. You might have a stale device tracker dragging it to "away."
+
+## 12. service vs. action: Know the Difference
+
+Starting in HA 2024.x, the `service:` key in actions was renamed to `action:`. Both work, but you'll see both in examples online and it causes confusion.
+
+```yaml
+# Old syntax (still works)
+action:
+  - service: light.turn_on
+    target:
+      entity_id: light.kitchen
+
+# New syntax (2024+)
+action:
+  - action: light.turn_on
+    target:
+      entity_id: light.kitchen
+```
+
+They are functionally identical. `service:` is not deprecated and will keep working. But if you're starting fresh or refactoring, `action:` is the current convention. Just be consistent within each file — mixing them won't break anything but it looks messy.
+
+## 13. Common YAML Syntax Errors (and How to Fix Them)
+
+These three mistakes account for 90% of the YAML errors I've debugged.
+
+**Indentation errors.** YAML is whitespace-sensitive. Every nested level must be exactly 2 spaces (convention, not spec — but HA expects consistency). Tabs will break everything silently.
+
+```yaml
+# Broken — mixed indentation
+automation:
+  - trigger:
+      - platform: state
+        entity_id: binary_sensor.door
+    action:
+        - service: light.turn_on  # 8 spaces instead of 6 — ERROR
+```
+
+**Unquoted colons.** Any value containing a colon needs quotes. This burns people with timestamps and messages.
+
+```yaml
+# Broken — colon in an unquoted string
+message: Warning: door is open
+
+# Fixed
+message: "Warning: door is open"
+```
+
+**Booleans as strings.** YAML treats `on`, `off`, `yes`, `no`, `true`, `false` as booleans. If you mean the string `"on"`, quote it.
+
+```yaml
+# This compares to boolean True, not string "on"
+state: on
+
+# This compares to the string "on" — what you want
+state: "on"
+```
+
+If your automation never triggers and the YAML looks fine, check that your state comparisons are quoted.
+
+## 14. Validate Config Before You Restart
+
+A YAML error in any package file will prevent Home Assistant from starting. Always validate before you restart.
+
+**From the UI:** Go to Developer Tools > YAML > Check Configuration. This parses all your YAML files and reports errors without restarting.
+
+**From the command line** (if you have SSH or terminal access):
+
+```bash
+ha core check
+```
+
+This runs the same validation. If it returns "Configuration is valid," you're safe to restart.
+
+**From VS Code:** Install the Home Assistant Config Helper extension. It highlights syntax errors in real-time as you type and provides schema validation for known configuration keys.
+
+I validate after every edit, before every restart. The 10 seconds it takes has saved me from plenty of 3-minute restart-crash-fix-restart cycles.
+
+## 15. Use Traces in Developer Tools to Debug
+
+When an automation doesn't do what you expect, don't guess — read the trace.
+
+Go to **Developer Tools > Automations**, find your automation, and click **Traces**. Each run shows:
+
+- Which trigger fired (and its data)
+- Each condition evaluated (pass or fail, with the actual values)
+- Each action executed (and whether it succeeded)
+- The exact timestamp of every step
+
+```
+Trigger: state of binary_sensor.front_door changed to "on"
+Condition: person.baily is "home" → PASS
+Condition: input_boolean.notifications → FAIL (state: "off")
+Result: Stopped at condition — no actions executed
+```
+
+If your automation ran but the notification didn't arrive, the trace will show you whether the `notify` service call succeeded or threw an error. If it never ran at all, the trace will show which condition blocked it.
+
+You can also fire automations manually from Developer Tools > Services using `automation.trigger` — this bypasses conditions and runs the action sequence directly. Useful for testing the action chain without waiting for the real trigger.
+
+## The Boring Truth
+
+Most YAML problems aren't interesting. They're a missing quote, a wrong indentation level, or a `mode: single` that silently swallows re-triggers. The tips above won't make your smart home feel like science fiction — but they'll stop you from losing afternoons to problems that have nothing to do with your actual automation logic.
+
+Write clean YAML, validate before you restart, and read the traces when something breaks. That's 80% of the battle.
+
+---
+
+If you want 25 production-tested automations with clean YAML you can drop straight into your system, check out **[The HA Automation Cookbook](https://beslain.gumroad.com/l/ha-automation-cookbook)** — packages for presence, lighting, security, climate, and quality-of-life. Each file includes inline comments showing exactly what to customize.
+
+Use code **LAUNCH50** for 50% off.
+
+---
+
+*This post is part of [The Automated Home](/) — practical Home Assistant guides from a 700+ entity production system.*

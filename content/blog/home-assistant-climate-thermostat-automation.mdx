@@ -1,0 +1,571 @@
+---
+title: "Home Assistant Climate Automation: Thermostat Schedules, Away Mode, and Energy Savings"
+description: "Automate your thermostat with Home Assistant — schedules, away mode, window-open HVAC cutoff, humidity alerts, and seasonal setpoints. Complete YAML for every pattern."
+date: "2026-04-07"
+slug: "home-assistant-climate-thermostat-automation"
+keywords:
+  - home assistant climate automation
+  - home assistant thermostat schedule
+  - home assistant away mode thermostat
+  - smart thermostat automation yaml
+---
+
+# Home Assistant Climate Automation: Thermostat Schedules, Away Mode, and Energy Savings
+
+Your thermostat is likely the most expensive device in your home to leave on autopilot. A poorly scheduled HVAC system wastes hundreds of dollars a year heating and cooling an empty house, running full blast while windows are open, or holding summer setpoints deep into November.
+
+Home Assistant gives you complete control over every climate entity in your system. You can build thermostat schedules with four periods per day, presence-based away mode, window-open HVAC cutoff, humidity alerts, seasonal setpoint switching, and temperature-driven fan control — all in native YAML with no custom components.
+
+I run 16 `climate.thermostat_*` entities on an ELK bus in a production Home Assistant system with 700+ entities. Everything in this guide is tested against real hardware and real utility bills.
+
+## Understanding Climate Entities
+
+The `climate` domain in Home Assistant represents any device that controls temperature — thermostats, mini-splits, HVAC zones, portable heaters with smart plugs. Every climate entity exposes these core attributes:
+
+- **hvac_mode** — `heat`, `cool`, `heat_cool`, `off`, `fan_only`
+- **temperature** — target temperature (single setpoint mode)
+- **target_temp_high** / **target_temp_low** — upper and lower bounds in `heat_cool` mode
+- **current_temperature** — what the sensor reads right now
+- **hvac_action** — what the system is actually doing: `heating`, `cooling`, `idle`, `off`
+
+The key services you will use in automations:
+
+- `climate.set_temperature` — change the target temperature
+- `climate.set_hvac_mode` — switch between heat, cool, off, etc.
+- `climate.turn_off` / `climate.turn_on` — simple on/off
+
+If you have a single thermostat, your entity is probably `climate.thermostat` or similar. Multi-zone systems (like my ELK-based setup) create one entity per zone: `climate.thermostat_master_bedroom`, `climate.thermostat_living_room`, etc.
+
+## Helpers: Configurable Setpoints and Season Mode
+
+Before building automations, set up the helpers that make everything configurable from the UI without editing YAML.
+
+```yaml
+# configuration.yaml or a package file
+input_number:
+  hvac_home_heat:
+    name: Home Heat Setpoint
+    min: 60
+    max: 80
+    step: 1
+    unit_of_measurement: "°F"
+    icon: mdi:thermometer-chevron-up
+
+  hvac_home_cool:
+    name: Home Cool Setpoint
+    min: 65
+    max: 85
+    step: 1
+    unit_of_measurement: "°F"
+    icon: mdi:thermometer-chevron-down
+
+  hvac_away_heat:
+    name: Away Heat Setpoint
+    min: 55
+    max: 70
+    step: 1
+    unit_of_measurement: "°F"
+    icon: mdi:thermometer-low
+
+  hvac_away_cool:
+    name: Away Cool Setpoint
+    min: 70
+    max: 90
+    step: 1
+    unit_of_measurement: "°F"
+    icon: mdi:snowflake-thermometer
+
+  hvac_sleep_heat:
+    name: Sleep Heat Setpoint
+    min: 58
+    max: 72
+    step: 1
+    unit_of_measurement: "°F"
+    icon: mdi:bed
+
+  hvac_sleep_cool:
+    name: Sleep Cool Setpoint
+    min: 68
+    max: 80
+    step: 1
+    unit_of_measurement: "°F"
+    icon: mdi:bed-outline
+
+  humidity_alert_threshold:
+    name: Humidity Alert Threshold
+    min: 30
+    max: 80
+    step: 5
+    unit_of_measurement: "%"
+    icon: mdi:water-percent
+
+input_select:
+  hvac_season:
+    name: HVAC Season Mode
+    options:
+      - summer
+      - winter
+      - shoulder
+    icon: mdi:sun-snowflake-variant
+```
+
+Set reasonable defaults: Home heat 70, home cool 75, away heat 62, away cool 82, sleep heat 66, sleep cool 72. The season selector drives which setpoints and modes apply system-wide.
+
+## Automation 1: Four-Period Thermostat Schedule
+
+This is the workhorse. Four periods per day — morning, day, evening, sleep — each with its own setpoint pulled from helpers. The season mode determines whether you are heating, cooling, or running dual setpoints.
+
+```yaml
+automation:
+  - alias: hvac_schedule_morning
+    id: hvac_schedule_morning
+    description: "Set morning comfort temperature at 6:00 AM"
+    trigger:
+      - platform: time
+        at: "06:00:00"
+    condition:
+      - condition: state
+        entity_id: person.baily
+        state: "home"
+    action:
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: input_select.hvac_season
+                state: "winter"
+            sequence:
+              - service: climate.set_temperature
+                target:
+                  entity_id: climate.thermostat_living_room
+                data:
+                  temperature: "{{ states('input_number.hvac_home_heat') | float }}"
+                  hvac_mode: heat
+          - conditions:
+              - condition: state
+                entity_id: input_select.hvac_season
+                state: "summer"
+            sequence:
+              - service: climate.set_temperature
+                target:
+                  entity_id: climate.thermostat_living_room
+                data:
+                  temperature: "{{ states('input_number.hvac_home_cool') | float }}"
+                  hvac_mode: cool
+        default:
+          - service: climate.set_temperature
+            target:
+              entity_id: climate.thermostat_living_room
+            data:
+              target_temp_high: "{{ states('input_number.hvac_home_cool') | float }}"
+              target_temp_low: "{{ states('input_number.hvac_home_heat') | float }}"
+              hvac_mode: heat_cool
+
+  - alias: hvac_schedule_day
+    id: hvac_schedule_day
+    description: "Relax setpoints during daytime hours"
+    trigger:
+      - platform: time
+        at: "09:00:00"
+    condition:
+      - condition: state
+        entity_id: person.baily
+        state: "home"
+    action:
+      - service: climate.set_temperature
+        target:
+          entity_id: climate.thermostat_living_room
+        data:
+          temperature: >
+            {% if is_state('input_select.hvac_season', 'winter') %}
+              {{ (states('input_number.hvac_home_heat') | float) - 2 }}
+            {% else %}
+              {{ (states('input_number.hvac_home_cool') | float) + 2 }}
+            {% endif %}
+
+  - alias: hvac_schedule_evening
+    id: hvac_schedule_evening
+    description: "Return to comfort setpoints in the evening"
+    trigger:
+      - platform: time
+        at: "17:00:00"
+    condition:
+      - condition: state
+        entity_id: person.baily
+        state: "home"
+    action:
+      - service: climate.set_temperature
+        target:
+          entity_id: climate.thermostat_living_room
+        data:
+          temperature: >
+            {% if is_state('input_select.hvac_season', 'winter') %}
+              {{ states('input_number.hvac_home_heat') | float }}
+            {% else %}
+              {{ states('input_number.hvac_home_cool') | float }}
+            {% endif %}
+
+  - alias: hvac_schedule_sleep
+    id: hvac_schedule_sleep
+    description: "Set sleep temperature at 10:00 PM"
+    trigger:
+      - platform: time
+        at: "22:00:00"
+    action:
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: input_select.hvac_season
+                state: "winter"
+            sequence:
+              - service: climate.set_temperature
+                target:
+                  entity_id: climate.thermostat_master_bedroom
+                data:
+                  temperature: "{{ states('input_number.hvac_sleep_heat') | float }}"
+                  hvac_mode: heat
+          - conditions:
+              - condition: state
+                entity_id: input_select.hvac_season
+                state: "summer"
+            sequence:
+              - service: climate.set_temperature
+                target:
+                  entity_id: climate.thermostat_master_bedroom
+                data:
+                  temperature: "{{ states('input_number.hvac_sleep_cool') | float }}"
+                  hvac_mode: cool
+        default:
+          - service: climate.set_temperature
+            target:
+              entity_id: climate.thermostat_master_bedroom
+            data:
+              target_temp_high: "{{ states('input_number.hvac_sleep_cool') | float }}"
+              target_temp_low: "{{ states('input_number.hvac_sleep_heat') | float }}"
+              hvac_mode: heat_cool
+```
+
+The morning automation only fires if you are home — no point heating an empty house at 6 AM. The sleep automation fires regardless because if you are home at 10 PM, you are probably going to bed. Adjust times and entity IDs to match your system.
+
+For multi-zone systems, add more entity IDs to the `target` block or duplicate the automations per zone with zone-specific helpers.
+
+## Automation 2: Presence-Based Away Mode
+
+When everyone leaves, drop the setpoints to save energy. When someone arrives, restore comfort temperatures. This pairs with the schedule — away mode overrides the schedule, and arrival restores whatever period is currently active.
+
+```yaml
+automation:
+  - alias: hvac_away_mode_on
+    id: hvac_away_mode_on
+    description: "Set away temperatures when everyone leaves"
+    trigger:
+      - platform: state
+        entity_id: person.baily
+        to: "not_home"
+        for:
+          minutes: 10
+    action:
+      - service: climate.set_temperature
+        target:
+          entity_id:
+            - climate.thermostat_living_room
+            - climate.thermostat_master_bedroom
+        data:
+          target_temp_high: "{{ states('input_number.hvac_away_cool') | float }}"
+          target_temp_low: "{{ states('input_number.hvac_away_heat') | float }}"
+          hvac_mode: heat_cool
+
+  - alias: hvac_away_mode_off
+    id: hvac_away_mode_off
+    description: "Restore home temperatures on arrival"
+    trigger:
+      - platform: state
+        entity_id: person.baily
+        to: "home"
+    action:
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: input_select.hvac_season
+                state: "winter"
+            sequence:
+              - service: climate.set_temperature
+                target:
+                  entity_id:
+                    - climate.thermostat_living_room
+                    - climate.thermostat_master_bedroom
+                data:
+                  temperature: "{{ states('input_number.hvac_home_heat') | float }}"
+                  hvac_mode: heat
+          - conditions:
+              - condition: state
+                entity_id: input_select.hvac_season
+                state: "summer"
+            sequence:
+              - service: climate.set_temperature
+                target:
+                  entity_id:
+                    - climate.thermostat_living_room
+                    - climate.thermostat_master_bedroom
+                data:
+                  temperature: "{{ states('input_number.hvac_home_cool') | float }}"
+                  hvac_mode: cool
+```
+
+The 10-minute departure delay is critical. Without it, a brief GPS drift or WiFi disconnect triggers away mode while you are still on the couch. Ten minutes is enough to filter out false departures without wasting energy on a real departure.
+
+For multi-person households, use a group or template binary sensor that only reports "away" when all tracked persons are `not_home`. A single person still home should keep comfort temperatures active.
+
+## Automation 3: Window-Open HVAC Cutoff
+
+Running the AC with a window open is like cooling the neighborhood. A contact sensor on the window triggers this automation to shut off the HVAC and restore it when the window closes.
+
+```yaml
+automation:
+  - alias: hvac_window_open_cutoff
+    id: hvac_window_open_cutoff
+    description: "Turn off HVAC when a window is opened for more than 2 minutes"
+    trigger:
+      - platform: state
+        entity_id:
+          - binary_sensor.living_room_window
+          - binary_sensor.master_bedroom_window
+        to: "on"
+        for:
+          minutes: 2
+    action:
+      - service: climate.turn_off
+        target:
+          entity_id: >
+            {% if trigger.entity_id == 'binary_sensor.living_room_window' %}
+              climate.thermostat_living_room
+            {% else %}
+              climate.thermostat_master_bedroom
+            {% endif %}
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "HVAC Cutoff"
+          message: >
+            {{ trigger.to_state.attributes.friendly_name | default(trigger.entity_id) }}
+            open for 2 minutes — HVAC turned off in that zone.
+
+  - alias: hvac_window_closed_restore
+    id: hvac_window_closed_restore
+    description: "Restore HVAC when window closes"
+    trigger:
+      - platform: state
+        entity_id:
+          - binary_sensor.living_room_window
+          - binary_sensor.master_bedroom_window
+        to: "off"
+    action:
+      - delay:
+          seconds: 30
+      - service: climate.turn_on
+        target:
+          entity_id: >
+            {% if trigger.entity_id == 'binary_sensor.living_room_window' %}
+              climate.thermostat_living_room
+            {% else %}
+              climate.thermostat_master_bedroom
+            {% endif %}
+```
+
+The 2-minute delay on the cutoff prevents a briefly cracked window from killing your HVAC. The 30-second delay on restore gives the window time to fully seal before the system kicks back on. If you have many windows, use a group (`group.all_windows`) as the trigger and turn off the entire HVAC system instead of per-zone.
+
+## Automation 4: Humidity Alert
+
+High indoor humidity causes mold, musty smells, and general misery. If your climate entities or a separate humidity sensor report humidity, you can alert on thresholds and optionally switch the HVAC to dry mode or trigger a dehumidifier.
+
+```yaml
+automation:
+  - alias: humidity_alert_high
+    id: humidity_alert_high
+    description: "Alert when indoor humidity exceeds threshold"
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.master_bedroom_humidity
+        above: input_number.humidity_alert_threshold
+        for:
+          minutes: 15
+    action:
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "High Humidity Alert"
+          message: >
+            {{ state_attr('sensor.master_bedroom_humidity', 'friendly_name') }}
+            is at {{ states('sensor.master_bedroom_humidity') }}%.
+            Threshold is {{ states('input_number.humidity_alert_threshold') }}%.
+      - condition: state
+        entity_id: input_select.hvac_season
+        state: "summer"
+      - service: climate.set_hvac_mode
+        target:
+          entity_id: climate.thermostat_master_bedroom
+        data:
+          hvac_mode: dry
+```
+
+The 15-minute `for` duration prevents alerts from brief spikes after a shower or cooking. In summer, the automation goes one step further and switches the HVAC to dry mode (if your system supports it). In winter, humidity is usually welcome, so the automation only sends the notification.
+
+## Automation 5: Seasonal Setpoint Switching
+
+Instead of manually adjusting every setpoint twice a year, automate the season change based on the calendar or outdoor temperature. This automation uses a date trigger but you could replace it with an outdoor temperature sensor crossing a threshold.
+
+```yaml
+automation:
+  - alias: hvac_season_switch_summer
+    id: hvac_season_switch_summer
+    description: "Switch to summer mode on May 1"
+    trigger:
+      - platform: time
+        at: "00:00:00"
+    condition:
+      - condition: template
+        value_template: "{{ now().month == 5 and now().day == 1 }}"
+    action:
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.hvac_season
+        data:
+          option: summer
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.hvac_home_cool
+        data:
+          value: 74
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.hvac_home_heat
+        data:
+          value: 68
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "HVAC Season Change"
+          message: "Switched to summer mode. Cool: 74, Heat: 68."
+
+  - alias: hvac_season_switch_winter
+    id: hvac_season_switch_winter
+    description: "Switch to winter mode on November 1"
+    trigger:
+      - platform: time
+        at: "00:00:00"
+    condition:
+      - condition: template
+        value_template: "{{ now().month == 11 and now().day == 1 }}"
+    action:
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.hvac_season
+        data:
+          option: winter
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.hvac_home_cool
+        data:
+          value: 78
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.hvac_home_heat
+        data:
+          value: 70
+      - service: notify.mobile_app_b_iphone
+        data:
+          title: "HVAC Season Change"
+          message: "Switched to winter mode. Heat: 70, Cool: 78."
+```
+
+May and November work for most US climates. Adjust for your region. The shoulder months (April, October) can use `heat_cool` mode with a wider dead band — set the heat and cool setpoints 8-10 degrees apart so the system rarely cycles.
+
+For a smarter approach, trigger on a 7-day rolling average outdoor temperature crossing 60F (switch to heat-dominant) or 75F (switch to cool-dominant) using a statistics sensor.
+
+## Automation 6: Temperature-Based Fan Control
+
+A ceiling fan or tower fan running during mild cooling demand saves compressor cycles. This automation turns a fan on when the indoor temperature exceeds the cool setpoint by a small margin and the HVAC is not actively cooling — filling the gap before the compressor kicks in.
+
+```yaml
+automation:
+  - alias: hvac_fan_assist_on
+    id: hvac_fan_assist_on
+    description: "Turn on fan when temperature is slightly above cool setpoint"
+    trigger:
+      - platform: template
+        value_template: >
+          {{ state_attr('climate.thermostat_living_room', 'current_temperature') | float
+             > (states('input_number.hvac_home_cool') | float - 2) }}
+    condition:
+      - condition: state
+        entity_id: input_select.hvac_season
+        state: "summer"
+      - condition: template
+        value_template: >
+          {{ state_attr('climate.thermostat_living_room', 'hvac_action') != 'cooling' }}
+    action:
+      - service: fan.turn_on
+        target:
+          entity_id: fan.smart_tower_fan
+        data:
+          percentage: 50
+
+  - alias: hvac_fan_assist_off
+    id: hvac_fan_assist_off
+    description: "Turn off fan when temperature drops below cool setpoint or HVAC is cooling"
+    trigger:
+      - platform: template
+        value_template: >
+          {{ state_attr('climate.thermostat_living_room', 'current_temperature') | float
+             < (states('input_number.hvac_home_cool') | float - 3) }}
+      - platform: template
+        value_template: >
+          {{ state_attr('climate.thermostat_living_room', 'hvac_action') == 'cooling' }}
+    action:
+      - service: fan.turn_off
+        target:
+          entity_id: fan.smart_tower_fan
+```
+
+The 2-degree trigger offset means the fan turns on when the room is within 2 degrees of the cooling setpoint — warm enough to feel uncomfortable but not enough to trigger the compressor. The 3-degree off threshold creates a 1-degree hysteresis band so the fan does not cycle rapidly on and off. When the compressor does kick in, the fan turns off to avoid overcooling.
+
+## Putting It All Together
+
+With all six automations running, here is what a typical day looks like:
+
+1. **6:00 AM** — morning schedule fires, sets comfort temperature based on season
+2. **7:30 AM** — you leave for work, presence detection marks you away after 10 minutes, away setpoints applied
+3. **12:00 PM** — house holds at away temperature, saving energy
+4. **5:15 PM** — you arrive home, comfort temperature restored immediately
+5. **5:30 PM** — you open a window to let in evening air, HVAC cuts off after 2 minutes
+6. **5:45 PM** — window closed, HVAC restored after 30 seconds
+7. **8:00 PM** — temperature rises slightly, fan kicks on before compressor needs to fire
+8. **10:00 PM** — sleep schedule fires, bedroom drops to sleep temperature
+9. **All day** — humidity monitored, alerts sent if threshold exceeded
+
+Each automation handles one concern. They compose cleanly because they all read from the same helpers. Change the cool setpoint in the UI and every automation that references it adjusts automatically.
+
+## Tips for Multi-Zone Systems
+
+If you run multiple climate zones like I do:
+
+- **Group zones by behavior.** Living areas, bedrooms, and utility zones rarely need the same schedule. Create separate helpers for each group if their setpoints differ significantly.
+- **Use the `target` list.** Most of these automations accept a list of entity IDs in the target block. Add or remove zones without duplicating automation logic.
+- **Stagger start times.** If all 16 zones change setpoints at exactly 6:00 AM, you may create a voltage sag or blow a circuit breaker. Stagger by 30-60 seconds per zone or group.
+- **Monitor with the energy dashboard.** After running for a week, check the energy dashboard to see if your schedule actually reduced consumption. Adjust the day setback and away setpoints based on real data.
+
+## Troubleshooting
+
+**HVAC mode does not change.** Some thermostats only support a subset of HVAC modes. Check the `hvac_modes` attribute on your climate entity in Developer Tools > States. If `heat_cool` is not listed, your thermostat does not support dual setpoints and you need to use `heat` or `cool` exclusively.
+
+**Temperature does not hold.** This is usually a hardware issue, not an automation issue. Check that the thermostat sensor is not near a vent, window, or heat source. Multi-zone systems with shared ductwork can also fight each other if one zone calls for heat while an adjacent zone calls for cool.
+
+**Away mode triggers while home.** Increase the departure delay from 10 to 15 minutes. Make sure you have at least two device trackers assigned to your person entity (companion app + router). See the [presence detection guide](/blog/home-assistant-presence-detection-guide) for the full setup.
+
+**Fan cycles on and off rapidly.** Widen the hysteresis band. Change the on threshold from 2 degrees below setpoint to 3, or the off threshold from 3 to 4. Template triggers evaluate on every state change, so noisy temperature sensors can cause rapid cycling.
+
+## Go Further
+
+This guide covers the core climate patterns. If you want the full set — per-room scheduling, vacation mode, multi-stage heating, heat pump optimization, and the YAML packages ready to drop into your config — the Automation Cookbook has it.
+
+[Get the Automation Cookbook](https://beslain.gumroad.com/l/ha-automation-cookbook) — $19, use code **LAUNCH50** for 50% off at launch.
+
+---
+
+*This post is part of [The Automated Home](/) — practical Home Assistant guides from a 700+ entity production system.*
