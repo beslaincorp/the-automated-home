@@ -1,0 +1,383 @@
+---
+title: "ESPHome + Home Assistant: Build Your First Custom Sensor in 30 Minutes"
+description: "Get started with ESPHome and Home Assistant. Flash an ESP32, configure YAML, and build a temperature/humidity sensor that auto-discovers in HA. Complete walkthrough with working config."
+date: "2026-04-10"
+slug: "esphome-home-assistant-getting-started"
+keywords:
+  - esphome home assistant
+  - esphome getting started
+  - esp32 home assistant
+  - esphome yaml configuration
+  - diy home assistant sensor
+---
+
+# ESPHome + Home Assistant: Build Your First Custom Sensor in 30 Minutes
+
+Off-the-shelf Zigbee sensors work fine until you need something specific — a sensor in an enclosure that fits a particular spot, a relay that triggers on a condition no commercial product supports, or a board that combines three functions for $4 instead of buying three $30 devices.
+
+That is where ESPHome comes in. It turns cheap ESP32 and ESP8266 boards into fully integrated Home Assistant devices with zero custom firmware code. You write YAML. ESPHome compiles it, flashes it, and the device shows up in HA automatically.
+
+I use ESPHome nodes across my 700+ entity system for things commercial sensors cannot do. This guide gets you from zero to a working temperature/humidity sensor reporting to Home Assistant in about 30 minutes.
+
+## What ESPHome Actually Is
+
+ESPHome is a firmware generator. You describe what your microcontroller should do in a YAML file — which GPIO pins to read, what sensors are attached, how to connect to WiFi — and ESPHome compiles that into firmware, flashes it to the board, and handles the HA integration automatically via its native API.
+
+No Arduino IDE. No C++. No MQTT broker (unless you want one). The device appears in Home Assistant as a native integration with auto-discovered entities.
+
+The key workflow:
+
+1. Write a YAML config file
+2. ESPHome compiles it into firmware
+3. Flash the firmware to your ESP board (USB the first time, OTA after that)
+4. Home Assistant auto-discovers the device
+5. Edit the YAML and push updates over WiFi — no USB cable needed
+
+## Why ESPHome Over Tasmota or WLED
+
+**Tasmota** is great for flashing off-the-shelf smart plugs and switches. It is a general-purpose firmware with a web UI. But when you need custom sensor logic, conditional behavior, or tight HA integration, you hit its limits fast. Tasmota communicates via MQTT, which means running a broker, configuring topics, and writing HA discovery configs yourself for anything non-standard.
+
+**WLED** is purpose-built for addressable LEDs and it is the best at that. If you only need LED control, use WLED. But it does not do sensors, relays, or general GPIO.
+
+**ESPHome** fills the gap: custom hardware configs with native HA integration, no broker, OTA updates, and a YAML-only workflow. If you are building a device that talks to Home Assistant, ESPHome is the right tool almost every time.
+
+Use Tasmota if you are reflashing an existing commercial device. Use WLED if you only need LED strips. Use ESPHome for everything else.
+
+## Hardware: What to Buy
+
+### ESP32-S3 (Recommended)
+
+The ESP32-S3 is the current best choice. Dual-core, built-in USB, Bluetooth LE, plenty of GPIO, and enough RAM for most projects. A dev board costs $4-8 on AliExpress or $10-15 on Amazon.
+
+Good boards:
+- **ESP32-S3-DevKitC-1** — Espressif's reference board. Well-documented, widely available.
+- **ESP32-S3-WROOM-1** modules on generic dev boards — cheap and reliable.
+- **Seeed XIAO ESP32S3** — tiny form factor if space matters.
+
+### ESP8266 (Budget Option)
+
+The ESP8266 is older, single-core, fewer GPIOs, and less RAM. But it costs $2-3, and for simple single-sensor nodes it works fine. The **Wemos D1 Mini** is the classic choice — small, cheap, USB-C on newer revisions.
+
+Do not buy ESP8266 for new projects if you plan to add features later. The memory limits will bite you. Spend the extra $3 on an ESP32.
+
+### For This Guide
+
+You need:
+- 1x ESP32 dev board (any variant)
+- 1x DHT22 temperature/humidity sensor (~$3)
+- 3x jumper wires (female-to-female or female-to-male depending on your board)
+- USB cable to connect the board to your computer
+
+Total cost: under $15.
+
+## First Flash: The Web Installer
+
+The fastest way to get ESPHome running on a new board is the web installer. No software to install on your computer.
+
+1. Open [web.esphome.io](https://web.esphome.io) in Chrome or Edge (must support Web Serial)
+2. Plug your ESP32 into your computer via USB
+3. Click **Connect** and select the serial port
+4. Click **Prepare for first use**
+5. Follow the prompts to connect it to your WiFi network
+
+That is it. The board now runs a basic ESPHome firmware and is connected to your network. You will configure the actual functionality through the ESPHome dashboard next.
+
+### Install the ESPHome Add-on (HA OS / Supervised)
+
+If you are running Home Assistant OS or Supervised:
+
+1. Go to **Settings > Add-ons > Add-on Store**
+2. Search for **ESPHome**
+3. Install and start it
+4. Open the ESPHome dashboard from the sidebar
+
+For HA Container or Core, run ESPHome as a standalone tool:
+
+```bash
+pip install esphome
+# or
+docker run -d --name esphome \
+  -p 6052:6052 \
+  -v /config/esphome:/config \
+  esphome/esphome
+```
+
+## YAML Config Anatomy
+
+Every ESPHome device config has the same structure. Here is the skeleton:
+
+```yaml
+esphome:
+  name: office-sensor
+  friendly_name: "Office Sensor"
+
+esp32:
+  board: esp32-s3-devkitc-1
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Fallback hotspot if WiFi fails
+  ap:
+    ssid: "Office-Sensor-Fallback"
+    password: "fallback123"
+
+captive_portal:
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+```
+
+Let me break down each block.
+
+### `esphome:`
+
+The device identity. `name` becomes the hostname and the entity prefix in HA. Keep it lowercase with hyphens. `friendly_name` is what shows in the HA UI.
+
+### `esp32:` / `esp8266:`
+
+Board definition. This tells ESPHome which chip you are using so it compiles the right firmware. Common values:
+
+- `esp32-s3-devkitc-1` — ESP32-S3 dev kit
+- `esp32dev` — generic ESP32
+- `d1_mini` — Wemos D1 Mini (ESP8266)
+- `nodemcuv2` — NodeMCU v2 (ESP8266)
+
+### `wifi:`
+
+Your network credentials. Always use `!secret` references that point to a `secrets.yaml` file in your ESPHome directory — never hardcode passwords in device configs.
+
+The `ap:` block creates a fallback hotspot if the device cannot connect to WiFi. Combined with `captive_portal:`, you can reconfigure WiFi credentials from your phone without reflashing. This has saved me multiple times after changing router passwords.
+
+### `logger:`
+
+Enables serial and wireless logging. Leave it on during development. You can view logs in the ESPHome dashboard in real time.
+
+### `api:`
+
+The native API that Home Assistant uses to communicate with the device. The encryption key is generated automatically when you create a new device in the ESPHome dashboard. This replaces MQTT — the device talks directly to HA with auto-discovery.
+
+### `ota:`
+
+Over-the-air updates. After the first USB flash, every subsequent firmware update goes over WiFi. This is the single best feature of ESPHome — you never have to unscrew an enclosure or pull a board out of a wall to update it.
+
+## Build 1: DHT22 Temperature and Humidity Sensor
+
+Wire the DHT22 to your ESP32:
+
+| DHT22 Pin | ESP32 Pin |
+|-----------|-----------|
+| VCC (pin 1) | 3.3V |
+| Data (pin 2) | GPIO4 |
+| NC (pin 3) | — |
+| GND (pin 4) | GND |
+
+Add a 10k pull-up resistor between VCC and Data if your DHT22 module does not have one built in. Most breakout boards include it already.
+
+Here is the complete config:
+
+```yaml
+esphome:
+  name: office-sensor
+  friendly_name: "Office Sensor"
+
+esp32:
+  board: esp32-s3-devkitc-1
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Office-Sensor-Fallback"
+    password: "fallback123"
+
+captive_portal:
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+sensor:
+  - platform: dht
+    pin: GPIO4
+    model: DHT22
+    temperature:
+      name: "Temperature"
+      filters:
+        - offset: -1.2  # calibration offset if needed
+    humidity:
+      name: "Humidity"
+    update_interval: 30s
+```
+
+Flash this config to your board:
+
+1. In the ESPHome dashboard, click the three dots on your device and select **Install**
+2. Choose **Wirelessly** (if already flashed once) or **Plug into this computer** for first flash
+3. Wait for the compile and upload to finish (~60 seconds)
+
+Go to **Settings > Devices & Services** in Home Assistant. You will see a notification that a new ESPHome device was discovered. Click **Configure**, enter the encryption key, and the device is integrated. Two entities appear: `sensor.office_sensor_temperature` and `sensor.office_sensor_humidity`.
+
+That is a working sensor node. Under $15 in hardware. No soldering beyond the header pins if your board does not come with them pre-soldered.
+
+## Build 2: GPIO Binary Sensors
+
+Binary sensors are even simpler. A reed switch on a door, a PIR motion detector, a button — anything that is either on or off.
+
+Example: a door sensor using a magnetic reed switch wired between GPIO5 and GND.
+
+```yaml
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO5
+      mode:
+        input: true
+        pullup: true
+    name: "Workshop Door"
+    device_class: door
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+```
+
+The `pullup: true` enables the internal pull-up resistor so you do not need an external one. The `delayed_on/off` filters debounce the signal — mechanical switches bounce for a few milliseconds when they change state, and without filtering you will get rapid on/off/on/off events.
+
+Setting `device_class: door` tells Home Assistant this is a door sensor, which controls the icon, history display, and which automations templates suggest it for.
+
+You can put multiple sensors on one board. A single ESP32 can handle a DHT22, three reed switches, a PIR sensor, and a relay — all in one YAML file, all as separate entities in HA.
+
+```yaml
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO5
+      mode:
+        input: true
+        pullup: true
+    name: "Workshop Door"
+    device_class: door
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+
+  - platform: gpio
+    pin:
+      number: GPIO18
+      mode:
+        input: true
+        pullup: true
+    name: "Workshop Motion"
+    device_class: motion
+    filters:
+      - delayed_off: 10s  # hold motion state for 10 seconds after last trigger
+```
+
+## Automations Using ESPHome Sensors
+
+Once your ESPHome sensors are in Home Assistant, they work exactly like any other entity. No special handling needed.
+
+Example: turn on a light when the workshop motion sensor triggers and turn it off after 5 minutes of no motion.
+
+```yaml
+automation:
+  - id: "workshop_motion_light"
+    alias: "Workshop Motion Light"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.workshop_motion
+        to: "on"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.workshop_bench
+        data:
+          brightness_pct: 100
+
+  - id: "workshop_motion_light_off"
+    alias: "Workshop Motion Light Off"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.workshop_motion
+        to: "off"
+        for: "00:05:00"
+    action:
+      - service: light.turn_off
+        target:
+          entity_id: light.workshop_bench
+```
+
+Or trigger notifications based on temperature thresholds:
+
+```yaml
+  - id: "server_room_temp_alert"
+    alias: "Server Room Temperature Alert"
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.office_sensor_temperature
+        above: 85
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "Temperature Alert"
+          message: "Office sensor reading {{ states('sensor.office_sensor_temperature') }}F"
+```
+
+ESPHome sensors update Home Assistant in real time over the native API. There is no polling interval on the HA side — the device pushes state changes as they happen.
+
+## OTA Updates: The Killer Feature
+
+After the first USB flash, you never touch a cable again. Edit the YAML, click **Install > Wirelessly**, and the firmware updates over WiFi in about 30 seconds.
+
+This matters more than you think. Once a sensor is mounted inside an enclosure and screwed to a wall, the idea of taking it down, opening the case, and plugging in a USB cable to change one line of YAML is a non-starter. OTA means you can iterate on the config from your desk.
+
+A few OTA tips:
+
+- **Always keep the `ap:` fallback hotspot configured.** If you push a WiFi config change that breaks connectivity, the device will create its own hotspot so you can fix it.
+- **Use `!secret` for all credentials.** One `secrets.yaml` file, all devices reference it. Change your WiFi password in one place.
+- **Set a static IP** for production devices so they reconnect faster after power loss:
+
+```yaml
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  manual_ip:
+    static_ip: 192.168.1.50
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+```
+
+## What to Build Next
+
+Once you have the basics working, ESPHome opens up a lot:
+
+- **Relay control** — switch a GPIO to control a relay module, exposed as a `switch` entity in HA
+- **Analog sensors** — soil moisture, light level, current monitoring via ADC pins
+- **I2C sensors** — BME280 (temperature/humidity/pressure), BH1750 (light), SCD40 (CO2)
+- **Bluetooth proxies** — ESP32 boards can act as BLE proxies for HA, extending Bluetooth range throughout your house
+- **Display nodes** — SSD1306 OLED or e-ink displays showing HA sensor data
+- **Custom components** — when YAML is not enough, you can write C++ lambdas inline
+
+Each of these follows the same pattern: add a few lines of YAML, flash OTA, entities appear in HA.
+
+---
+
+If you want a collection of production-tested automations that work with ESPHome sensors and the rest of the Home Assistant ecosystem, the [Automation Cookbook](https://beslain.gumroad.com/l/ha-automation-cookbook) has ready-to-use YAML configs for motion lighting, presence detection, climate control, and more. Use code **LAUNCH50** for 50% off.
+
+---
+
+*This post is part of [The Automated Home](/) — practical Home Assistant guides from a 700+ entity production system.*
