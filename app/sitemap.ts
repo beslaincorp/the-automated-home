@@ -1,7 +1,7 @@
 import { MetadataRoute } from 'next';
 import { getAllPosts } from '@/lib/blog';
 
-const BASE_URL = process.env.SITE_URL || 'https://theautomatedhome.com';
+const BASE_URL = process.env.SITE_URL || 'https://automatedhomeguides.com';
 
 export default function sitemap(): MetadataRoute.Sitemap {
   const posts = getAllPosts();
