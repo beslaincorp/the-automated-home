@@ -1,0 +1,258 @@
+---
+title: "Home Assistant Packages: How to Organize Automations Like a Pro (2026 Guide)"
+description: "Stop cramming everything into automations.yaml. Home Assistant packages let you group automations, sensors, helpers, and scripts into modular files. Complete guide with examples from a 60+ automation system."
+date: "2026-04-03"
+slug: "home-assistant-packages-yaml-guide"
+keywords:
+  - home assistant packages
+  - home assistant yaml organization
+  - home assistant packages yaml
+  - home assistant modular automations
+  - organize home assistant automations
+---
+
+# Home Assistant Packages: How to Organize Automations Like a Pro
+
+If you have more than 10 automations, your `automations.yaml` file is a mess. You know it. I know it. And every time you need to edit one thing, you scroll through 500 lines of YAML trying to find it.
+
+Home Assistant has a built-in solution that almost nobody uses: **packages**.
+
+I run 60+ automations organized into 11 package files. Each file is self-contained — the automations, helpers, sensors, and scripts for one purpose all live together. Here's how to set it up and why you should.
+
+## What Are Packages?
+
+A package is a single YAML file that can contain **any Home Assistant configuration** — automations, input_booleans, input_numbers, sensors, scripts, timers, and more.
+
+Instead of scattering your automation in `automations.yaml`, your helper in `configuration.yaml`, and your script in `scripts.yaml`, you put everything for one feature in one file.
+
+```yaml
+# /config/packages/garage.yaml — everything garage-related in one place
+
+input_boolean:
+  garage_notifications_enabled:
+    name: Garage Notifications
+    icon: mdi:garage
+
+timer:
+  garage_auto_close:
+    duration: "00:10:00"
+
+automation:
+  - id: "garage_auto_close_warning"
+    alias: "Garage Auto-Close Warning"
+    trigger:
+      - platform: state
+        entity_id: cover.garage_bay_1
+        to: "open"
+        for: "00:08:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.garage_notifications_enabled
+        state: "on"
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "Garage Still Open"
+          message: "Bay 1 has been open for 8 minutes. Closing in 2 minutes."
+          data:
+            actions:
+              - action: KEEP_OPEN
+                title: "Keep Open"
+
+  - id: "garage_auto_close_execute"
+    alias: "Garage Auto-Close Execute"
+    trigger:
+      - platform: state
+        entity_id: cover.garage_bay_1
+        to: "open"
+        for: "00:10:00"
+    action:
+      - service: cover.close_cover
+        target:
+          entity_id: cover.garage_bay_1
+```
+
+One file. Everything related to the garage. No hunting across three different files.
+
+## How to Enable Packages
+
+Add two lines to your `configuration.yaml`:
+
+```yaml
+homeassistant:
+  packages: !include_dir_named packages/
+```
+
+Then create a `packages/` directory inside `/config/`:
+
+```
+/config/
+├── configuration.yaml
+├── packages/
+│   ├── garage.yaml
+│   ├── security_modes.yaml
+│   ├── alarm_response.yaml
+│   ├── camera_push.yaml
+│   ├── zone_logging.yaml
+│   └── night_lights.yaml
+```
+
+Restart Home Assistant. Every YAML file in `packages/` is automatically loaded.
+
+## Why This Is Better Than automations.yaml
+
+### 1. Everything for one feature lives together
+
+When your garage door auto-close breaks at 2 AM, you open `garage.yaml`. The automation, the timer, the notification toggle, and the helper are all right there. You don't need to check three files.
+
+### 2. You can copy a package to another system
+
+Want to share your garage automation? Send one file. The recipient drops it into `packages/` and restarts. Done. No "also add this helper" and "don't forget this input_boolean" instructions.
+
+### 3. You can disable an entire feature by renaming one file
+
+Rename `camera_push.yaml` to `camera_push.yaml.disabled`. Restart. Every automation, helper, and sensor in that package is gone. Rename it back to restore everything.
+
+### 4. Git diffs actually make sense
+
+When you version control your config (you should), each commit shows exactly which feature changed. No more 200-line diffs in `automations.yaml` where you can't tell what's related.
+
+## My Package Structure (60+ Automations)
+
+Here's how I organize a real production system with 700+ entities:
+
+| Package File | What It Contains | Automations |
+|---|---|---|
+| `alarm_response.yaml` | Full alarm trigger chain — flash lights, TTS, push notifications, camera snapshots | 5 |
+| `security_modes.yaml` | Arm/disarm based on presence, time of day, bedtime routine | 6 |
+| `zone_logging.yaml` | Track every door/window/PIR state change with timestamps | 3 |
+| `camera_push.yaml` | Webhook-driven camera notifications with cooldown timers | 4 |
+| `camera_ai.yaml` | AI-based object detection flags (person vs car vs animal) | 2 |
+| `jarvis_tts.yaml` | Voice announcements for arrivals, departures, alarms, goodnight | 9 |
+| `night_lights.yaml` | Motion-activated lights with time-based brightness curves | 8 |
+| `garage.yaml` | Auto-close with warning, departure/arrival notifications | 4 |
+| `presence.yaml` | Person detection, home/away states, welcome home triggers | 5 |
+| `time_based.yaml` | Scheduled automations — exterior lights, nighttime modes | 6 |
+| `room_scenes.yaml` | Scene scripts for movie mode, bedtime, morning, etc. | 8+ scripts |
+
+Every automation has an `id:` field (required for the UI to track it), and every package includes the helpers it depends on.
+
+## Common Patterns
+
+### Kill Switch Pattern
+
+Add an `input_boolean` to dangerous automations so you can disable them without editing YAML:
+
+```yaml
+input_boolean:
+  alarm_automations_enabled:
+    name: Alarm Automations
+    icon: mdi:shield-check
+
+automation:
+  - id: "alarm_triggered_response"
+    alias: "Alarm Triggered Response"
+    trigger:
+      - platform: state
+        entity_id: alarm_control_panel.panel
+        to: "triggered"
+    condition:
+      - condition: state
+        entity_id: input_boolean.alarm_automations_enabled
+        state: "on"
+    action:
+      # ... your alarm response
+```
+
+Now you can toggle the entire alarm response chain from the dashboard or HomeKit without touching YAML.
+
+### Timer Cooldown Pattern
+
+Prevent notification spam with a timer that absorbs duplicate triggers:
+
+```yaml
+timer:
+  camera_cooldown:
+    duration: "00:02:00"
+
+automation:
+  - id: "camera_motion_detected"
+    trigger:
+      - platform: webhook
+        webhook_id: camera_front_motion
+    action:
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.front_camera_motion
+      - service: timer.start
+        target:
+          entity_id: timer.camera_cooldown
+
+  - id: "camera_send_notification"
+    trigger:
+      - platform: state
+        entity_id: input_boolean.front_camera_motion
+        to: "on"
+    condition:
+      - condition: state
+        entity_id: timer.camera_cooldown
+        state: "idle"
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "Motion Detected"
+          message: "Front camera detected motion"
+          data:
+            image: "http://192.168.1.x/cgi-bin/viewer/video.jpg"
+```
+
+One camera fires 5-10 webhooks per event. This pattern collapses them into a single notification with a 2-minute cooldown.
+
+### Dependency Declaration Pattern
+
+Put a comment block at the top of each package listing what it needs:
+
+```yaml
+# Package: alarm_response
+# Depends on:
+#   - alarm_control_panel.elkm1_area_1
+#   - input_boolean.alarm_automations_enabled (defined here)
+#   - notify.mobile_app_phone
+#   - tts.piper
+# Outputs:
+#   - Notifications, TTS announcements, light flashing on alarm
+```
+
+When something breaks, you know exactly which entities to check.
+
+## Package vs. Blueprint: When to Use Which
+
+**Blueprints** are templates — you configure them through the UI, and HA generates the automation. Great for reusable patterns you apply multiple times (like "night light for room X").
+
+**Packages** are raw config — you write the YAML, and everything is explicit. Better for complex automations that depend on multiple helpers, timers, and scripts working together.
+
+Use blueprints for simple, repeatable patterns. Use packages for anything with more than one moving part.
+
+## Migrating From automations.yaml
+
+1. Create `/config/packages/`
+2. Add the `packages: !include_dir_named packages/` line
+3. Pick one feature (like garage) and move its automation to a new package file
+4. Move the related helpers, timers, and scripts into the same file
+5. Remove them from `automations.yaml`, `configuration.yaml`, etc.
+6. Restart and test
+7. Repeat for the next feature
+
+Don't try to migrate everything at once. Move one package per day until you're done.
+
+## Get 25 Ready-to-Use Packages
+
+If you want a head start, I put together **[The HA Automation Cookbook](https://beslain.gumroad.com/l/ha-automation-cookbook)** — 25 production-tested automations packaged as individual YAML files. Each one includes the automation, helpers, and inline comments showing what to customize.
+
+Presence, lighting, climate, security, and quality-of-life automations. Drop them in `packages/`, customize the entity IDs, restart. Done.
+
+Use code **LAUNCH50** for 50% off.
+
+---
+
+*This post is part of [The Automated Home](/) — practical Home Assistant guides from a 700+ entity production system.*
